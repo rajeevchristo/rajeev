@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en" data-critters-container>
+    <head>
+        <meta charset="utf-8">
+        <base href="/login/">
+        <meta name="robots" content="noindex, nofollow">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="https://static.gcore.pro/fonts/noto-sans/index.css">
+        <style>
+            .page-loader-overlay-init {
+                position: fixed;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                top: 0;
+                background: rgba(255, 255, 255, 0.6);
+                z-index: 9999;
+            }
+
+            .page-loader-overlay-init .loader-item-init {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+            }
+
+            .loader-wrapper-init {
+                display: block;
+                text-align: center;
+                margin: 10px 0;
+            }
+
+            .loader-wrapper-init .loader {
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                background-color: #ccc;
+                margin: 7px;
+                display: inline-block;
+                animation: pulse-loader 1.2s infinite ease-in-out;
+            }
+
+            .loader-wrapper-init .loader.loader-1 {
+                animation-delay: 0;
+            }
+
+            .loader-wrapper-init .loader.loader-2 {
+                animation-delay: 0.2s;
+            }
+
+            .loader-wrapper-init .loader.loader-3 {
+                animation-delay: 0.4s;
+            }
+
+            @-moz-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @-webkit-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @-o-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @-moz-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @-webkit-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @-o-keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+
+            @keyframes pulse-loader {
+                0%,
+                100% {
+                    opacity: 0;
+                    transform: scale(1);
+                }
+
+                50% {
+                    opacity: 1;
+                    transform: scale(1.5);
+                }
+            }
+        </style>
+    <style>@charset "UTF-8";body{--gc-background-color-base:#f5f4f4;--gc-background-red-color:#fff4f2;--gc-secondary-red-color:#f6413b;--gc-font-color:#363636;--gc-font-text-grey-color:#818181;--gc-font-text-secondary-color:#363636;--gc-select-text-color:#363636;--gc-card-view-box-shadow:0 1px 3px 0 rgba(0, 0, 0, .08);--gc-card-view-box-shadow-top:0 1px 0 #f5f4f4 inset;--gc-card-view-border-radius:5px;--gc-card-header-color:#363636;--gc-sidebar-nav-background-color:#f5f4f4;--gc-sidebar-nav-shadow:inset -1px 0 0 0 #e8e8e8;--gc-border-base:none;--gc-sidebar-line-height:20px;--gc-top-bar-background-color:#f5f4f4;--gc-top-bar-box-shadow:inset 0 -1px 0 0 #e8e8e8;--gc-top-bar-title-color:#363636;--gc-line-height-base:20px;--gc-icon-color-base:#ababab;--gc-avatar-background-color:#CAC4D0;--gc-list-group-divider-border:1px #e8e8e8 solid;--gc-tab-default-disabled-text-color:#e8e8e8;--gc-nav-menu-filled-menu-item-opened-background:#e8e8e8;--gc-disabled-text-color:#ababab;--gc-button-padding:8px 16px;--gc-button-destructive-border:1px solid #faa9a0;--gc-button-destructive-text-color:#f6413b;--gc-button-destructive-hover-bg:#f6413b;--gc-button-destructive-hover-border-color:#faa9a0;--gc-button-destructive-disabled-border-color:#fcd9d4;--gc-button-destructive-disabled-text-color:#faa9a0;--gc-font-family:"Inter", BlinkMacSystemFont, -apple-system, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", "Helvetica", "Arial", sans-serif}body{--spacer:.2857142857rem;--spacing-0:0;--spacing-1:var(--spacer);--spacing-2:calc(var(--spacer) * 2);--spacing-3:calc(var(--spacer) * 3);--spacing-4:calc(var(--spacer) * 4);--spacing-5:calc(var(--spacer) * 5);--spacing-6:calc(var(--spacer) * 6);--spacing-7:calc(var(--spacer) * 7);--spacing-8:calc(var(--spacer) * 8);--spacing-9:calc(var(--spacer) * 9);--spacing-10:calc(var(--spacer) * 10)}:root{--blue:#007bff;--indigo:#6610f2;--purple:#6f42c1;--pink:#e83e8c;--red:#f6413b;--orange:#fd7e14;--yellow:#ffc107;--green:#28a745;--teal:#20c997;--cyan:#17a2b8;--white:#fff;--gray:#818181;--gray-dark:#363636;--primary:#007bff;--secondary:#818181;--success:#28a745;--info:#17a2b8;--warning:#ffc107;--danger:#f6413b;--light:#fbfbfb;--dark:#363636;--breakpoint-xs:0;--breakpoint-sm:576px;--breakpoint-md:768px;--breakpoint-lg:992px;--breakpoint-xl:1200px;--font-family-sans-serif:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";--font-family-monospace:SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}*,*:before,*:after{box-sizing:border-box}html{font-family:sans-serif;line-height:1.15;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:rgba(0,0,0,0)}body{margin:0;font-family:var(--gc-font-family);font-size:1rem;font-weight:400;line-height:1.4285714286;color:var(--gc-font-color);text-align:left;background-color:#fff}@media print{*,*:before,*:after{text-shadow:none!important;box-shadow:none!important}@page{size:a3}body{min-width:992px!important}}:root{--gc-color-white:#FFFFFF;--gc-color-black:#000000;--gc-color-primary:#FF4C00;--gc-color-secondary:#FFF2EA;--gc-color-primary-hover:#f04800;--gc-color-header:#e9e9e9;--gc-color-hoverMenu:#f5f4f4;--gc-color-separator:#e9e9e9;--gc-color-headerText:#818181}html{height:100%;font-size:14px}body{height:100%;background-color:var(--gc-background-color-base);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}@supports (scrollbar-width: thin){:where(*){scrollbar-width:thin}}html{font-size:14px}body{font-family:var(--gc-font-family);font-size:1rem;color:#363636;background:#f5f4f4;min-height:100vh;box-sizing:border-box;font-weight:400;margin:0;-webkit-font-smoothing:antialiased}*{box-sizing:inherit}</style><link rel="stylesheet" href="styles.9beeafea6d8c35ce.css" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="styles.9beeafea6d8c35ce.css"></noscript></head>
+    <body>
+        <auth-fe-root>
+            <div class="page-loader-overlay-init">
+                <div class="loader-item-init">
+                    <div class="loader-wrapper-init">
+                        <div class="loader loader-1"></div>
+                        <div class="loader loader-2"></div>
+                        <div class="loader loader-3"></div>
+                    </div>
+                </div>
+            </div>
+        </auth-fe-root>
+        <script src="/login/assets/sentry-config.js"></script>
+    <script src="runtime.34fcd3d5730b5c1a.js" type="module"></script><script src="polyfills.eb0b4970959a4494.js" type="module"></script><script src="main.a39d38930b78c333.js" type="module"></script></body>
+</html>
