@@ -17,25 +17,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ─────────────────────────────────────────────
-      # Checkout
-      # ─────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ─────────────────────────────────────────────
       # Run gosec
-      # ─────────────────────────────────────────────
       - name: Run gosec
         uses: securego/gosec@v2.22.4
         with:
           args: -fmt=sarif -out=gosec.sarif -no-fail ./...
 
-      # ─────────────────────────────────────────────
       # Run Trivy
-      # ─────────────────────────────────────────────
       - name: Run Trivy
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -46,17 +39,13 @@ jobs:
           ignore-unfixed: true
           skip-dirs: 'vendor,node_modules,.git'
 
-      # ─────────────────────────────────────────────
       # Setup reviewdog
-      # ─────────────────────────────────────────────
       - name: Setup reviewdog
         uses: reviewdog/action-setup@v1
         with:
           reviewdog_version: latest
 
-      # ─────────────────────────────────────────────
-      # Post gosec inline findings
-      # ─────────────────────────────────────────────
+      # Post gosec inline comments
       - name: Post gosec findings
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,9 +56,7 @@ jobs:
             -level=warning \
             < gosec.sarif || true
 
-      # ─────────────────────────────────────────────
-      # Post Trivy inline findings
-      # ─────────────────────────────────────────────
+      # Post Trivy inline comments
       - name: Post Trivy findings
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,9 +67,7 @@ jobs:
             -level=warning \
             < trivy.sarif || true
 
-      # ─────────────────────────────────────────────
-      # Security Summary Comment
-      # ─────────────────────────────────────────────
+      # Security Summary
       - name: Security Scan Summary
         if: always()
         uses: actions/github-script@v7
@@ -90,112 +75,87 @@ jobs:
           script: |
             const fs = require('fs');
 
-            function getSeverityIcon(severity) {
-              severity = String(severity).toUpperCase();
+            function severityIcon(sev) {
+              sev = String(sev).toUpperCase();
 
-              if (severity.includes('CRITICAL')) {
-                return '🛑 CRITICAL';
-              }
-
-              if (severity.includes('HIGH')) {
-                return '🔴 HIGH';
-              }
-
-              if (severity.includes('MEDIUM')) {
-                return '🟠 MEDIUM';
-              }
-
-              if (severity.includes('LOW')) {
-                return '🟡 LOW';
-              }
+              if (sev.includes('CRITICAL')) return '🛑 CRITICAL';
+              if (sev.includes('HIGH')) return '🔴 HIGH';
+              if (sev.includes('MEDIUM')) return '🟠 MEDIUM';
+              if (sev.includes('LOW')) return '🟡 LOW';
 
               return '⚪ UNKNOWN';
             }
 
             function getCodeLine(file, line) {
               try {
-                const content = fs
-                  .readFileSync(file, 'utf8')
-                  .split('\n');
-
-                return content[line - 1]
-                  ? content[line - 1].trim()
-                  : 'Unable to read source line';
-              } catch (e) {
+                const lines = fs.readFileSync(file, 'utf8').split('\n');
+                return lines[line - 1]?.trim() || 'Unable to read source';
+              } catch {
                 return 'Unable to read source';
               }
             }
 
-            function parseSarif(file, toolName) {
+            function parseSarif(file, tool) {
+
               if (!fs.existsSync(file)) {
                 return [];
               }
 
-              try {
-                const sarif = JSON.parse(
-                  fs.readFileSync(file, 'utf8')
-                );
+              const sarif = JSON.parse(
+                fs.readFileSync(file, 'utf8')
+              );
 
-                const findings = [];
+              const findings = [];
 
-                for (const run of sarif.runs || []) {
+              for (const run of sarif.runs || []) {
 
-                  const rules =
-                    run.tool?.driver?.rules || [];
+                const rules = run.tool?.driver?.rules || [];
+                const results = run.results || [];
 
-                  const results =
-                    run.results || [];
+                for (const result of results) {
 
-                  for (const result of results) {
+                  const rule = rules.find(
+                    r => r.id === result.ruleId
+                  );
 
-                    const rule = rules.find(
-                      r => r.id === result.ruleId
-                    );
+                  const severity =
+                    result.level ||
+                    rule?.properties?.severity ||
+                    'UNKNOWN';
 
-                    const severity =
-                      result.level ||
-                      rule?.properties?.severity ||
-                      rule?.properties?.securitySeverityLevel ||
-                      'UNKNOWN';
+                  const locationData =
+                    result.locations?.[0]?.physicalLocation || {};
 
-                    const physicalLocation =
-                      result.locations?.[0]?.physicalLocation || {};
+                  const filePath =
+                    locationData.artifactLocation?.uri ||
+                    'unknown file';
 
-                    const location =
-                      physicalLocation.artifactLocation?.uri ||
-                      'unknown file';
+                  const line =
+                    locationData.region?.startLine || '?';
 
-                    const line =
-                      physicalLocation.region?.startLine || '?';
+                  const code =
+                    typeof line === 'number'
+                      ? getCodeLine(filePath, line)
+                      : 'N/A';
 
-                    const codeLine =
-                      typeof line === 'number'
-                        ? getCodeLine(location, line)
-                        : 'N/A';
-
-                    findings.push({
-                      tool: toolName,
-                      severity: getSeverityIcon(severity),
-                      title:
-                        rule?.shortDescription?.text ||
-                        result.message?.text ||
-                        'No description',
-                      description:
-                        result.message?.text ||
-                        'No additional details',
-                      location,
-                      line,
-                      codeLine
-                    });
-                  }
+                  findings.push({
+                    tool,
+                    severity: severityIcon(severity),
+                    title:
+                      rule?.shortDescription?.text ||
+                      result.message?.text ||
+                      'No description',
+                    description:
+                      result.message?.text ||
+                      'No details',
+                    filePath,
+                    line,
+                    code
+                  });
                 }
-
-                return findings;
-
-              } catch (e) {
-                console.log(e);
-                return [];
               }
+
+              return findings;
             }
 
             const findings = [
@@ -203,61 +163,38 @@ jobs:
               ...parseSarif('trivy.sarif', 'Trivy')
             ];
 
-            let body = `
-# 🔐 Security Scan Report
-
-`;
+            let body = '# 🔐 Security Scan Report\n\n';
 
             if (findings.length === 0) {
 
-              body += `
-## ✅ No security issues found
-
-### Scanners Used
-- gosec
-- Trivy
-
-Your pull request passed all configured security checks 🎉
-`;
+              body += '## ✅ No security issues found\n\n';
+              body += 'Scanners used:\n';
+              body += '- gosec\n';
+              body += '- Trivy\n\n';
+              body += 'Your PR passed all configured security checks 🎉';
 
             } else {
 
-              body += `
-## ⚠️ ${findings.length} Potential Security Issue(s) Found
-
-Please review the findings below carefully.
-
----
-
-`;
+              body += '## ⚠️ ' + findings.length + ' Potential Security Issue(s) Found\n\n';
 
               for (const f of findings.slice(0, 20)) {
 
-                body += `
-### ${f.severity}
+                body += '---\n\n';
 
-- **Tool:** ${f.tool}
-- **Issue:** ${f.title}
-- **Location:** ${f.location}#L${f.line}
+                body += '### ' + f.severity + '\n\n';
 
-#### Vulnerable Code
-\`\`\`go
-${f.codeLine}
-\`\`\`
+                body += '- **Tool:** ' + f.tool + '\n';
+                body += '- **Issue:** ' + f.title + '\n';
+                body += '- **Location:** ' + f.filePath + ':' + f.line + '\n\n';
 
-#### Details
-${f.description}
+                body += '#### Vulnerable Code\n\n';
 
----
+                body += '```go\n';
+                body += f.code + '\n';
+                body += '```\n\n';
 
-`;
-              }
-
-              if (findings.length > 20) {
-
-                body += `
-⚠️ Additional findings were omitted from this summary.
-`;
+                body += '#### Details\n\n';
+                body += f.description + '\n\n';
               }
             }
 
