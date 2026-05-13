@@ -7,68 +7,247 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write        # Needed for the summary comment
+  issues: write
 
 jobs:
   security-review:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── gosec: Go code security scanner ──
+      # ─────────────────────────────────────────────
+      # gosec
+      # ─────────────────────────────────────────────
       - name: Run gosec
-        uses: securego/gosec@master
+        uses: securego/gosec@v2.22.4
         with:
           args: -fmt=sarif -out=gosec.sarif -no-fail ./...
 
-      # ── Trivy: Secrets + filesystem scan ──
+      # ─────────────────────────────────────────────
+      # Trivy
+      # ─────────────────────────────────────────────
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          scan-type: 'fs'
-          format: 'sarif'
-          output: 'trivy.sarif'
-          severity: 'CRITICAL,HIGH'
+          scan-type: fs
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
+          skip-dirs: vendor,node_modules,.git
 
-      # ── reviewdog: Post inline comments on the PR diff ──
+      # ─────────────────────────────────────────────
+      # reviewdog setup
+      # ─────────────────────────────────────────────
       - name: Setup reviewdog
         uses: reviewdog/action-setup@v1
         with:
           reviewdog_version: latest
 
+      # ─────────────────────────────────────────────
+      # Post inline comments
+      # ─────────────────────────────────────────────
       - name: Post gosec findings
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: reviewdog -f=sarif -reporter=github-pr-review -level=error < gosec.sarif || true
+        run: |
+          reviewdog \
+            -f=sarif \
+            -reporter=github-pr-review \
+            -level=warning \
+            < gosec.sarif || true
 
       - name: Post Trivy findings
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: reviewdog -f=sarif -reporter=github-pr-review -level=error < trivy.sarif || true
+        run: |
+          reviewdog \
+            -f=sarif \
+            -reporter=github-pr-review \
+            -level=warning \
+            < trivy.sarif || true
 
-      # ── NEW: Security Scan Summary (always shows the message you asked for) ──
+      # ─────────────────────────────────────────────
+      # Beautiful Security Summary Comment
+      # ─────────────────────────────────────────────
       - name: Security Scan Summary
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const gosecSize = fs.existsSync('gosec.sarif') ? fs.statSync('gosec.sarif').size : 0;
-            const trivySize = fs.existsSync('trivy.sarif') ? fs.statSync('trivy.sarif').size : 0;
-            
-            let message = '✅ **Security scan completed - No issues found**\n\n(gosec + Trivy scanned the PR diff)';
-            
-            if (gosecSize > 300 || trivySize > 300) {
-              message = '⚠️ **Security scan completed** - Potential issues were found. Please check the inline comments above.';
+
+            function getSeverityIcon(sev) {
+              sev = String(sev).toUpperCase();
+
+              if (sev.includes('CRITICAL')) return '🛑 CRITICAL';
+              if (sev.includes('HIGH')) return '🔴 HIGH';
+              if (sev.includes('MEDIUM')) return '🟠 MEDIUM';
+              if (sev.includes('LOW')) return '🟡 LOW';
+
+              return '⚪ UNKNOWN';
             }
-            
+
+            function getCodeLine(file, line) {
+              try {
+                const content = fs.readFileSync(file, 'utf8').split('\n');
+
+                if (!content[line - 1]) {
+                  return 'Unable to read source line';
+                }
+
+                return content[line - 1].trim();
+              } catch (e) {
+                return 'Unable to read source';
+              }
+            }
+
+            function parseSarif(file, toolName) {
+
+              if (!fs.existsSync(file)) {
+                return [];
+              }
+
+              try {
+
+                const sarif = JSON.parse(
+                  fs.readFileSync(file, 'utf8')
+                );
+
+                const findings = [];
+
+                for (const run of sarif.runs || []) {
+
+                  const rules = run.tool?.driver?.rules || [];
+                  const results = run.results || [];
+
+                  for (const result of results) {
+
+                    const rule = rules.find(
+                      r => r.id === result.ruleId
+                    );
+
+                    const severity =
+                      result.level ||
+                      rule?.properties?.severity ||
+                      rule?.properties?.securitySeverityLevel ||
+                      'UNKNOWN';
+
+                    const physicalLocation =
+                      result.locations?.[0]?.physicalLocation || {};
+
+                    const location =
+                      physicalLocation.artifactLocation?.uri ||
+                      'unknown file';
+
+                    const line =
+                      physicalLocation.region?.startLine || '?';
+
+                    const endLine =
+                      physicalLocation.region?.endLine || line;
+
+                    const codeLine =
+                      typeof line === 'number'
+                        ? getCodeLine(location, line)
+                        : 'N/A';
+
+                    findings.push({
+                      tool: toolName,
+                      severity: getSeverityIcon(severity),
+                      title:
+                        rule?.shortDescription?.text ||
+                        result.message?.text ||
+                        'No description',
+                      description:
+                        result.message?.text ||
+                        'No additional details',
+                      location,
+                      line,
+                      endLine,
+                      codeLine
+                    });
+                  }
+                }
+
+                return findings;
+
+              } catch (e) {
+                console.log(e);
+                return [];
+              }
+            }
+
+            const findings = [
+              ...parseSarif('gosec.sarif', 'gosec'),
+              ...parseSarif('trivy.sarif', 'Trivy')
+            ];
+
+            let body = `
+# 🔐 Security Scan Report
+
+`;
+
+            if (findings.length === 0) {
+
+              body += `
+## ✅ No security issues found
+
+### Scanners Used
+- gosec
+- Trivy
+
+Your pull request passed all configured security checks 🎉
+`;
+
+            } else {
+
+              body += `
+## ⚠️ ${findings.length} Potential Security Issue(s) Found
+
+Please review the findings below carefully.
+
+---
+`;
+
+              for (const f of findings.slice(0, 20)) {
+
+                body += `
+### ${f.severity}
+
+| Field | Value |
+|---|---|
+| **Tool** | ${f.tool} |
+| **Issue** | ${f.title} |
+| **Location** | \`${f.location}:${f.line}\` |
+
+#### Vulnerable Code
+\`\`\`go
+${f.codeLine}
+\`\`\`
+
+#### Details
+${f.description}
+
+---
+
+`;
+              }
+
+              if (findings.length > 20) {
+
+                body += `
+⚠️ Additional findings were omitted from this summary.
+`;
+              }
+            }
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: message
+              body
             });
