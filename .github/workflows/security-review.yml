@@ -2,7 +2,10 @@ name: Go Security PR Review (Free & Low Noise)
 
 on:
   pull_request:
-    branches: [main, master, develop]
+    branches:
+      - main
+      - master
+      - develop
 
 permissions:
   contents: read
@@ -14,13 +17,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      # ─────────────────────────────────────────────
+      # Checkout
+      # ─────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ─────────────────────────────────────────────
-      # gosec
+      # Run gosec
       # ─────────────────────────────────────────────
       - name: Run gosec
         uses: securego/gosec@v2.22.4
@@ -28,20 +34,20 @@ jobs:
           args: -fmt=sarif -out=gosec.sarif -no-fail ./...
 
       # ─────────────────────────────────────────────
-      # Trivy
+      # Run Trivy
       # ─────────────────────────────────────────────
       - name: Run Trivy
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          scan-type: fs
-          format: sarif
-          output: trivy.sarif
-          severity: CRITICAL,HIGH,MEDIUM
+          scan-type: 'fs'
+          format: 'sarif'
+          output: 'trivy.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: true
-          skip-dirs: vendor,node_modules,.git
+          skip-dirs: 'vendor,node_modules,.git'
 
       # ─────────────────────────────────────────────
-      # reviewdog setup
+      # Setup reviewdog
       # ─────────────────────────────────────────────
       - name: Setup reviewdog
         uses: reviewdog/action-setup@v1
@@ -49,7 +55,7 @@ jobs:
           reviewdog_version: latest
 
       # ─────────────────────────────────────────────
-      # Post inline comments
+      # Post gosec inline findings
       # ─────────────────────────────────────────────
       - name: Post gosec findings
         env:
@@ -61,6 +67,9 @@ jobs:
             -level=warning \
             < gosec.sarif || true
 
+      # ─────────────────────────────────────────────
+      # Post Trivy inline findings
+      # ─────────────────────────────────────────────
       - name: Post Trivy findings
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,7 +81,7 @@ jobs:
             < trivy.sarif || true
 
       # ─────────────────────────────────────────────
-      # Beautiful Security Summary Comment
+      # Security Summary Comment
       # ─────────────────────────────────────────────
       - name: Security Scan Summary
         if: always()
@@ -81,39 +90,48 @@ jobs:
           script: |
             const fs = require('fs');
 
-            function getSeverityIcon(sev) {
-              sev = String(sev).toUpperCase();
+            function getSeverityIcon(severity) {
+              severity = String(severity).toUpperCase();
 
-              if (sev.includes('CRITICAL')) return '🛑 CRITICAL';
-              if (sev.includes('HIGH')) return '🔴 HIGH';
-              if (sev.includes('MEDIUM')) return '🟠 MEDIUM';
-              if (sev.includes('LOW')) return '🟡 LOW';
+              if (severity.includes('CRITICAL')) {
+                return '🛑 CRITICAL';
+              }
+
+              if (severity.includes('HIGH')) {
+                return '🔴 HIGH';
+              }
+
+              if (severity.includes('MEDIUM')) {
+                return '🟠 MEDIUM';
+              }
+
+              if (severity.includes('LOW')) {
+                return '🟡 LOW';
+              }
 
               return '⚪ UNKNOWN';
             }
 
             function getCodeLine(file, line) {
               try {
-                const content = fs.readFileSync(file, 'utf8').split('\n');
+                const content = fs
+                  .readFileSync(file, 'utf8')
+                  .split('\n');
 
-                if (!content[line - 1]) {
-                  return 'Unable to read source line';
-                }
-
-                return content[line - 1].trim();
+                return content[line - 1]
+                  ? content[line - 1].trim()
+                  : 'Unable to read source line';
               } catch (e) {
                 return 'Unable to read source';
               }
             }
 
             function parseSarif(file, toolName) {
-
               if (!fs.existsSync(file)) {
                 return [];
               }
 
               try {
-
                 const sarif = JSON.parse(
                   fs.readFileSync(file, 'utf8')
                 );
@@ -122,8 +140,11 @@ jobs:
 
                 for (const run of sarif.runs || []) {
 
-                  const rules = run.tool?.driver?.rules || [];
-                  const results = run.results || [];
+                  const rules =
+                    run.tool?.driver?.rules || [];
+
+                  const results =
+                    run.results || [];
 
                   for (const result of results) {
 
@@ -147,9 +168,6 @@ jobs:
                     const line =
                       physicalLocation.region?.startLine || '?';
 
-                    const endLine =
-                      physicalLocation.region?.endLine || line;
-
                     const codeLine =
                       typeof line === 'number'
                         ? getCodeLine(location, line)
@@ -167,7 +185,6 @@ jobs:
                         'No additional details',
                       location,
                       line,
-                      endLine,
                       codeLine
                     });
                   }
@@ -211,6 +228,7 @@ Your pull request passed all configured security checks 🎉
 Please review the findings below carefully.
 
 ---
+
 `;
 
               for (const f of findings.slice(0, 20)) {
@@ -218,11 +236,9 @@ Please review the findings below carefully.
                 body += `
 ### ${f.severity}
 
-| Field | Value |
-|---|---|
-| **Tool** | ${f.tool} |
-| **Issue** | ${f.title} |
-| **Location** | \`${f.location}:${f.line}\` |
+- **Tool:** ${f.tool}
+- **Issue:** ${f.title}
+- **Location:** ${f.location}#L${f.line}
 
 #### Vulnerable Code
 \`\`\`go
@@ -249,5 +265,5 @@ ${f.description}
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body
+              body: body
             });
