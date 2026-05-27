@@ -32,35 +32,50 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const diff = fs.readFileSync('diff.txt', 'utf8');
+            const rawDiff = fs.readFileSync('diff.txt', 'utf8');
+
+            // ─── FILTER: keep only changed lines, strip context ────────
+            const filteredDiff = rawDiff
+              .split('\n')
+              .filter(line =>
+                line.startsWith('+') ||
+                line.startsWith('-') ||
+                line.startsWith('@@') ||
+                line.startsWith('diff --git')
+              )
+              .join('\n');
 
             // ─── CONFIG ────────────────────────────────────────────────
-            // INPUT token control  → how much of the diff we send
-            // OUTPUT token control → how long the review response can be
-            const MAX_DIFF_CHARS        = 28000;  // ~7,000 input tokens
-            const MAX_COMPLETION_TOKENS = 4000;   // output tokens for review
+            const MAX_DIFF_CHARS        = 120000;  // ~30,000 input tokens — covers 1000+ lines
+            const MAX_COMPLETION_TOKENS = 8000;    // more room for findings across 1000 lines
 
             // Model priority list — first one that works wins
-            // Models that need max_completion_tokens instead of max_tokens
             const MODELS = [
               { name: 'gpt-5.4-mini',  useCompletionTokens: true  },
               { name: 'gpt-4o-mini',   useCompletionTokens: false }
             ];
             // ───────────────────────────────────────────────────────────
 
-            // Guard: skip if diff is empty
-            const truncatedDiff = diff.length > MAX_DIFF_CHARS
-              ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
-              : diff;
+            const wasTruncated = filteredDiff.length > MAX_DIFF_CHARS;
 
+            const truncatedDiff = wasTruncated
+              ? filteredDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
+              : filteredDiff;
+
+            // Guard: skip if diff is empty
             if (!truncatedDiff.trim()) {
               console.log('No diff found. Skipping security review.');
               return;
             }
 
-            console.log(`Diff size: ${diff.length} chars → sending ${truncatedDiff.length} chars to model`);
+            console.log(`Original diff  : ${rawDiff.length} chars`);
+            console.log(`Filtered diff  : ${filteredDiff.length} chars`);
+            console.log(`Sent to model  : ${truncatedDiff.length} chars`);
             console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
             console.log(`Output tokens (max):     ${MAX_COMPLETION_TOKENS}`);
+            if (wasTruncated) {
+              console.log('⚠️  WARNING: Diff was truncated — some changes were NOT reviewed!');
+            }
 
             const today = new Date().toISOString().split('T')[0];
 
@@ -185,8 +200,6 @@ jobs:
               for (const model of MODELS) {
                 console.log(`Trying model: ${model.name}`);
 
-                // ← KEY FIX: newer GPT-5.x models use max_completion_tokens
-                //            older GPT-4.x models use max_tokens
                 const tokenParam = model.useCompletionTokens
                   ? { max_completion_tokens: MAX_COMPLETION_TOKENS }
                   : { max_tokens: MAX_COMPLETION_TOKENS };
@@ -214,8 +227,6 @@ jobs:
                 const errorBody = await response.text();
                 console.warn(`⚠️ Model ${model.name} failed (HTTP ${response.status}): ${errorBody}`);
 
-                // Only retry on model-related errors (404 = not found, 400 = bad param)
-                // For auth (401), rate limit (429), server (5xx) — fail immediately
                 if (response.status !== 404 && response.status !== 400) {
                   core.setFailed(`OpenAI API error ${response.status}: ${errorBody}`);
                   return;
@@ -236,7 +247,6 @@ jobs:
 
               const reviewText = data.choices[0].message.content;
 
-              // Token usage summary printed to Actions log
               const usage = data.usage || {};
               console.log('─── Token Usage ───────────────────────────');
               console.log(`  Prompt (input)     : ${usage.prompt_tokens     ?? 'N/A'} tokens`);
@@ -244,14 +254,14 @@ jobs:
               console.log(`  Total              : ${usage.total_tokens      ?? 'N/A'} tokens`);
               console.log('───────────────────────────────────────────');
 
-              // Footer appended to the PR comment
               const footer = [
                 '',
                 '---',
+                wasTruncated ? '> ⚠️ **Warning**: Diff was truncated — some changes were **NOT reviewed**. Consider splitting this PR.' : '',
                 `> 🤖 **Model used**: \`${usedModel}\``,
                 `> 📊 **Tokens** — Input: \`${usage.prompt_tokens ?? 'N/A'}\` | Output: \`${usage.completion_tokens ?? 'N/A'}\` | Total: \`${usage.total_tokens ?? 'N/A'}\``,
                 `> 📅 **Scanned**: ${today}`
-              ].join('\n');
+              ].filter(Boolean).join('\n');
 
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
