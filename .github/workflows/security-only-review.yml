@@ -16,7 +16,7 @@ jobs:
         run: git fetch origin ${{ github.base_ref }}
 
       - name: Get PR diff
-        run: git diff --no-color origin/${{ github.base_ref }}...HEAD > diff.txt
+        run: git diff --no-color --unified=2 origin/${{ github.base_ref }}...HEAD > diff.txt
 
       - name: Validate available GPT-5.4 models
         run: |
@@ -34,20 +34,9 @@ jobs:
             const fs = require('fs');
             const rawDiff = fs.readFileSync('diff.txt', 'utf8');
 
-            // ─── FILTER: keep only changed lines, strip context ────────
-            const filteredDiff = rawDiff
-              .split('\n')
-              .filter(line =>
-                line.startsWith('+') ||
-                line.startsWith('-') ||
-                line.startsWith('@@') ||
-                line.startsWith('diff --git')
-              )
-              .join('\n');
-
             // ─── CONFIG ────────────────────────────────────────────────
             const MAX_DIFF_CHARS        = 120000;  // ~30,000 input tokens — covers 1000+ lines
-            const MAX_COMPLETION_TOKENS = 8000;    // more room for findings across 1000 lines
+            const MAX_COMPLETION_TOKENS = 8000;    // enough for deep analysis of 1000 lines
 
             // Model priority list — first one that works wins
             const MODELS = [
@@ -56,11 +45,11 @@ jobs:
             ];
             // ───────────────────────────────────────────────────────────
 
-            const wasTruncated = filteredDiff.length > MAX_DIFF_CHARS;
+            const wasTruncated = rawDiff.length > MAX_DIFF_CHARS;
 
             const truncatedDiff = wasTruncated
-              ? filteredDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
-              : filteredDiff;
+              ? rawDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
+              : rawDiff;
 
             // Guard: skip if diff is empty
             if (!truncatedDiff.trim()) {
@@ -68,8 +57,7 @@ jobs:
               return;
             }
 
-            console.log(`Original diff  : ${rawDiff.length} chars`);
-            console.log(`Filtered diff  : ${filteredDiff.length} chars`);
+            console.log(`Raw diff size  : ${rawDiff.length} chars`);
             console.log(`Sent to model  : ${truncatedDiff.length} chars`);
             console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
             console.log(`Output tokens (max):     ${MAX_COMPLETION_TOKENS}`);
@@ -79,14 +67,16 @@ jobs:
 
             const today = new Date().toISOString().split('T')[0];
 
-            const prompt = `You are a senior Application Security Engineer.
+            const prompt = `You are a senior Application Security Engineer performing a thorough security audit.
             Your ONLY job is to analyze the code changes below and report security issues.
 
             STRICT RULES:
             - Report ONLY real security vulnerabilities (OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks, etc.).
             - NEVER comment on code style, performance, tests, maintainability, or anything non-security.
-            - If no security issues are found, reply with exactly: "✅ No security issues detected in this PR."
             - Classify every issue using EXACTLY one of: Critical, High, Medium, Low, Info.
+            - You MUST analyze every single changed line deeply and trace data flows end to end.
+            - Even if no issues are found, you MUST include a "Security Checklist" section listing every vulnerability class you checked (SQLi, XSS, SSRF, Auth, Secrets, IDOR, RCE, CSRF, Open Redirect, Weak Crypto, etc.) and one sentence explaining why each was ruled out. Never return a blank summary.
+            - Never return 0 issues on a diff larger than 100 lines without providing the full checklist.
 
             SEVERITY DEFINITIONS:
             - 🔴 Critical : Immediate exploitation possible — RCE, SQLi, hardcoded secrets, auth bypass.
@@ -184,12 +174,33 @@ jobs:
 
             ---
 
+            ### ✅ Security Checklist
+            *(Always include this section even if no issues found)*
+
+            | Vulnerability Class | Status | Notes |
+            |---------------------|--------|-------|
+            | SQL Injection (SQLi) | ✅ Not Found | No raw SQL queries with user input detected |
+            | Cross-Site Scripting (XSS) | ✅ Not Found | No unsanitized output to HTML detected |
+            | Server-Side Request Forgery (SSRF) | ✅ Not Found | No outbound requests with user-controlled URLs |
+            | Authentication / Auth Bypass | ✅ Not Found | Auth checks appear intact |
+            | Hardcoded Secrets / API Keys | ✅ Not Found | No secrets or tokens found in diff |
+            | Insecure Direct Object Reference (IDOR) | ✅ Not Found | Access control checks present |
+            | Remote Code Execution (RCE) | ✅ Not Found | No eval or shell exec with user input |
+            | Cross-Site Request Forgery (CSRF) | ✅ Not Found | CSRF tokens in place |
+            | Open Redirect | ✅ Not Found | Redirect targets are validated |
+            | Weak Cryptography | ✅ Not Found | No weak hash or cipher usage |
+            | Broken Access Control | ✅ Not Found | Role checks appear correct |
+            | Supply Chain / Dependency Risk | ✅ Not Found | No suspicious new dependencies |
+
+            ---
+
             > ⚠️ *Auto-generated review. Always verify findings manually before acting.*
 
             IMPORTANT:
             - Omit any severity section entirely if zero issues at that level.
             - Never print empty tables.
             - Number issues per group: CRIT-1, CRIT-2, HIGH-1, HIGH-2, MED-1, LOW-1, INFO-1 etc.
+            - ALWAYS include the Security Checklist section at the end, filled with real observations from the diff.
 
             PR changes to analyze:
             ${truncatedDiff}`;
@@ -212,8 +223,21 @@ jobs:
                   },
                   body: JSON.stringify({
                     model: model.name,
-                    messages: [{ role: "user", content: prompt }],
-                    temperature: 0.0,
+                    messages: [
+                      {
+                        role: "system",
+                        content: `You are an aggressive security auditor who never misses vulnerabilities.
+You MUST analyze every changed line deeply and trace all data flows.
+You MUST always return the full Security Checklist section at the end.
+Never return a response under 300 tokens — a thorough review always requires detailed output.
+If you find nothing critical, explain exactly what you checked and why it was ruled safe.`
+                      },
+                      {
+                        role: "user",
+                        content: prompt
+                      }
+                    ],
+                    temperature: 0.1,
                     ...tokenParam
                   })
                 });
@@ -254,10 +278,16 @@ jobs:
               console.log(`  Total              : ${usage.total_tokens      ?? 'N/A'} tokens`);
               console.log('───────────────────────────────────────────');
 
+              // Warn in Actions log if output tokens are suspiciously low
+              if ((usage.completion_tokens ?? 0) < 300) {
+                console.warn('⚠️  WARNING: Output tokens very low — model may not have done a full review!');
+              }
+
               const footer = [
                 '',
                 '---',
                 wasTruncated ? '> ⚠️ **Warning**: Diff was truncated — some changes were **NOT reviewed**. Consider splitting this PR.' : '',
+                (usage.completion_tokens ?? 0) < 300 ? '> ⚠️ **Warning**: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
                 `> 🤖 **Model used**: \`${usedModel}\``,
                 `> 📊 **Tokens** — Input: \`${usage.prompt_tokens ?? 'N/A'}\` | Output: \`${usage.completion_tokens ?? 'N/A'}\` | Total: \`${usage.total_tokens ?? 'N/A'}\``,
                 `> 📅 **Scanned**: ${today}`
