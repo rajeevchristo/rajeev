@@ -1,4 +1,4 @@
-name: Security-Only PR Review (OpenAI GPT-4o-mini)
+name: Security-Only PR Review (OpenAI GPT-5.4-mini)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -15,7 +15,13 @@ jobs:
         run: git fetch origin ${{ github.base_ref }}
       - name: Get PR diff
         run: git diff --no-color origin/${{ github.base_ref }}...HEAD > diff.txt
-      - name: Run Security-Only Review with GPT-4o-mini
+      - name: Validate model string
+        run: |
+          echo "Checking available GPT-5.4 models..."
+          curl -s https://api.openai.com/v1/models \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            | jq '[.data[].id | select(test("5\\.4"; "i"))]'
+      - name: Run Security-Only Review with GPT-5.4-mini
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -23,9 +29,22 @@ jobs:
           script: |
             const fs = require('fs');
             const diff = fs.readFileSync('diff.txt', 'utf8');
+
+            // Truncate diff if too large to avoid token limits
+            const MAX_DIFF_CHARS = 28000;
+            const truncatedDiff = diff.length > MAX_DIFF_CHARS
+              ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
+              : diff;
+
+            if (!truncatedDiff.trim()) {
+              console.log('No diff found. Skipping security review.');
+              return;
+            }
+
             try {
               const prompt = `You are a senior Application Security Engineer.
             Your ONLY job is to analyze the code changes below and report security issues.
+
             STRICT RULES:
             - Report ONLY real security vulnerabilities (OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks, etc.).
             - NEVER comment on code style, performance, tests, maintainability, or anything non-security.
@@ -41,10 +60,12 @@ jobs:
 
             OUTPUT FORMAT (use this exact structure):
 
-            ## Security Review
+            ## 🔐 Security Review
+
+            > **Model**: GPT-5.4-mini | **Scan Date**: {{DATE}}
 
             **Summary**: X security issue(s) found — 🔴 N Critical | 🟠 N High | 🟡 N Medium | 🔵 N Low | ℹ️ N Info
-            *(or "No issues found" if none)*
+            *(or "✅ No issues found" if none)*
 
             ---
 
@@ -56,6 +77,7 @@ jobs:
             **[CRIT-1] <Issue Title>**
             - **Description**: Clear explanation of the risk and why it is dangerous.
             - **CWE**: CWE-XXX – Name
+            - **OWASP**: A0X:2021 – Category
             - **Fix Suggestion**:
             \`\`\`diff
             - Insecure code here
@@ -72,6 +94,7 @@ jobs:
             **[HIGH-1] <Issue Title>**
             - **Description**: Clear explanation of the risk and why it is dangerous.
             - **CWE**: CWE-XXX – Name
+            - **OWASP**: A0X:2021 – Category
             - **Fix Suggestion**:
             \`\`\`diff
             - Insecure code here
@@ -88,6 +111,7 @@ jobs:
             **[MED-1] <Issue Title>**
             - **Description**: Clear explanation of the risk and why it is dangerous.
             - **CWE**: CWE-XXX – Name
+            - **OWASP**: A0X:2021 – Category
             - **Fix Suggestion**:
             \`\`\`diff
             - Insecure code here
@@ -104,6 +128,7 @@ jobs:
             **[LOW-1] <Issue Title>**
             - **Description**: Clear explanation of the risk and why it is dangerous.
             - **CWE**: CWE-XXX – Name
+            - **OWASP**: A0X:2021 – Category
             - **Fix Suggestion**:
             \`\`\`diff
             - Insecure code here
@@ -119,43 +144,82 @@ jobs:
 
             **[INFO-1] <Issue Title>**
             - **Description**: Brief observation and recommended best practice.
+            - **CWE**: CWE-XXX – Name *(if applicable)*
 
             ---
 
-            IMPORTANT: Omit any severity section entirely if there are zero issues at that level. Do not print empty tables.
+            > ⚠️ *This review was generated automatically. Always verify findings manually before acting.*
+
+            IMPORTANT RULES FOR OUTPUT:
+            - Omit any severity section entirely if there are zero issues at that level.
+            - Do not print empty tables.
+            - Replace {{DATE}} with today's date in YYYY-MM-DD format.
+            - Number issues sequentially per severity group: CRIT-1, CRIT-2, HIGH-1, HIGH-2, etc.
 
             Now analyze the following PR changes:
-            ${diff}`;
-              const response = await fetch("https://api.openai.com/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
-                },
-                body: JSON.stringify({
-                  model: "gpt-4o-mini",
-                  messages: [{ role: "user", content: prompt }],
-                  temperature: 0.0,
-                  max_tokens: 4000
-                })
-              });
-              if (!response.ok) {
+            ${truncatedDiff}`;
+
+              // Step 1: Try gpt-5.4-mini, fall back to gpt-4o-mini if unavailable
+              const MODELS = ['gpt-5.4-mini', 'gpt-4o-mini'];
+              let response, usedModel;
+
+              for (const model of MODELS) {
+                console.log(`Trying model: ${model}`);
+                response = await fetch("https://api.openai.com/v1/chat/completions", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+                  },
+                  body: JSON.stringify({
+                    model: model,
+                    messages: [{ role: "user", content: prompt }],
+                    temperature: 0.0,
+                    max_tokens: 4000
+                  })
+                });
+
+                if (response.ok) {
+                  usedModel = model;
+                  break;
+                }
+
                 const errorBody = await response.text();
-                core.setFailed(`OpenAI API error ${response.status}: ${errorBody}`);
+                console.warn(`Model ${model} failed (${response.status}): ${errorBody}`);
+
+                // If it's not a model-not-found error, don't retry
+                if (response.status !== 404 && response.status !== 400) {
+                  core.setFailed(`OpenAI API error ${response.status}: ${errorBody}`);
+                  return;
+                }
+              }
+
+              if (!response || !response.ok) {
+                core.setFailed('All model fallbacks exhausted. Could not complete security review.');
                 return;
               }
+
               const data = await response.json();
+
               if (!data.choices || !data.choices[0] || !data.choices[0].message) {
                 core.setFailed(`Unexpected OpenAI response: ${JSON.stringify(data)}`);
                 return;
               }
+
               const reviewText = data.choices[0].message.content;
+
+              // Append model info footer
+              const footer = `\n\n---\n> 🤖 *Reviewed using model: \`${usedModel}\` | Tokens used: ${data.usage?.total_tokens ?? 'N/A'}*`;
+
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: reviewText
+                body: reviewText + footer
               });
+
+              console.log(`Security review posted successfully using ${usedModel}.`);
+
             } catch (error) {
               core.setFailed(`Script error: ${error.message}`);
             }
