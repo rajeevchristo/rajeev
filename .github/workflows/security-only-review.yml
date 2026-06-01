@@ -1,4 +1,4 @@
-name: Security-Only PR Review (OpenAI GPT-4o)
+name: Security-Only PR Review (OpenAI GPT-5.4-mini)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -18,7 +18,14 @@ jobs:
       - name: Get PR diff
         run: git diff --no-color --unified=2 origin/${{ github.base_ref }}...HEAD > diff.txt
 
-      - name: Run Security-Only Review with GPT-4o
+      - name: Validate available GPT-5.4 models
+        run: |
+          echo "Checking available GPT-5.4 models..."
+          curl -s https://api.openai.com/v1/models \
+            -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+            | jq '[.data[].id | select(test("5\\.4"; "i"))]'
+
+      - name: Run Security-Only Review with GPT-5.4-mini
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -31,11 +38,9 @@ jobs:
             const MAX_DIFF_CHARS        = 120000;
             const MAX_COMPLETION_TOKENS = 8000;
 
-            // GPT-4o first — it has the reasoning depth needed for security
-            // analysis. gpt-4o-mini is a fallback only; expect lower recall.
             const MODELS = [
-              { name: 'gpt-4o',      useCompletionTokens: false },
-              { name: 'gpt-4o-mini', useCompletionTokens: false }
+              { name: 'gpt-5.4-mini',  useCompletionTokens: true  },
+              { name: 'gpt-4o-mini',   useCompletionTokens: false }
             ];
             // ───────────────────────────────────────────────────────────
 
@@ -60,70 +65,116 @@ jobs:
 
             const today = new Date().toISOString().split('T')[0];
 
-            // ─── SYSTEM PROMPT ─────────────────────────────────────────
-            // Focused on deep analysis — no easy escape hatch, no token floor
-            // that could be gamed. The model must justify a clean result.
-            const systemPrompt =
-              "You are an expert Application Security Engineer with 15+ years of experience in offensive security, secure code review, and vulnerability research. " +
-              "Your task is to perform a deep, line-by-line security audit of a code diff. " +
-              "You MUST trace every data flow end to end — from user-controlled input to every sink. " +
-              "You are not allowed to assume code is safe without explicitly reasoning through why. " +
-              "If you find no issues, you MUST still reason through each vulnerability class and explain why it does not apply to this diff specifically. " +
-              "A lazy or shallow review is a security failure.";
+            const systemPrompt = "You are an aggressive security auditor who never misses vulnerabilities. You MUST analyze every changed line deeply and trace all data flows. You MUST always return the full Security Checklist section at the end. Never return a response under 300 tokens — a thorough review always requires detailed output. If you find nothing critical, explain exactly what you checked and why it was ruled safe.";
 
-            // ─── USER PROMPT ───────────────────────────────────────────
-            // Key changes vs previous version:
-            //   1. "No issues" escape hatch appears ONCE only, at the end.
-            //   2. Model is required to show its reasoning even for clean diffs.
-            //   3. temperature stays low but reasoning requirement counteracts laziness.
-            const prompt =
-              "Perform a thorough security audit of the PR diff below.\n\n" +
-
+            const prompt = "You are a senior Application Security Engineer performing a thorough security audit.\n" +
+              "Your ONLY job is to analyze the code changes below and report security issues.\n\n" +
               "STRICT RULES:\n" +
-              "- Report ONLY real security vulnerabilities: OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks.\n" +
-              "- NEVER comment on code style, performance, tests, or maintainability.\n" +
-              "- Trace every user-controlled input to every possible sink. Do not skip any changed line.\n" +
-              "- Assume the worst-case attacker: no trust in any input, headers, query params, env vars, or file contents.\n" +
-              "- Do NOT pad with low-confidence noise. Only report what you can justify.\n\n" +
-
+              "- Report ONLY real security vulnerabilities (OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks, etc.).\n" +
+              "- NEVER comment on code style, performance, tests, maintainability, or anything non-security.\n" +
+              "- Classify every issue using EXACTLY one of: Critical, High, Medium, Low, Info.\n" +
+              "- You MUST analyze every single changed line deeply and trace data flows end to end.\n" +
+              "- Even if no issues are found, you MUST include a Security Checklist section listing every vulnerability class you checked and one sentence explaining why each was ruled out.\n" +
+              "- Never return 0 issues on a diff larger than 100 lines without providing the full checklist.\n\n" +
               "SEVERITY DEFINITIONS:\n" +
-              "- CRITICAL : Immediate exploitation possible — RCE, SQLi, hardcoded secrets, auth bypass.\n" +
-              "- HIGH     : Significant impact, likely exploitable — SSRF, IDOR, privilege escalation, XSS.\n" +
-              "- MEDIUM   : Moderate impact, needs specific conditions — open redirect, weak crypto, missing rate-limit, CSRF.\n" +
-              "- LOW      : Minor risk, limited impact — verbose errors, missing security headers, overly broad CORS.\n\n" +
-
-              "CERTAINTY DEFINITIONS:\n" +
-              "- Confirmed         : Vulnerability is clearly present and exploitable as written.\n" +
-              "- Suspected         : Strong indication; requires minor assumptions about surrounding code.\n" +
-              "- Unverified concern: Possible risk but depends on context not visible in the diff.\n\n" +
-
-              "OUTPUT FORMAT — use this exact structure for each issue found:\n\n" +
+              "- Critical : Immediate exploitation possible — RCE, SQLi, hardcoded secrets, auth bypass.\n" +
+              "- High     : Significant impact, likely exploitable — SSRF, IDOR, privilege escalation, XSS.\n" +
+              "- Medium   : Moderate impact, needs specific conditions — open redirect, weak crypto, missing rate-limit, CSRF.\n" +
+              "- Low      : Minor risk, limited impact — verbose errors, missing security headers, overly broad CORS.\n" +
+              "- Info     : Best-practice observations — dependency pinning, minor config notes.\n\n" +
+              "OUTPUT FORMAT (follow exactly):\n\n" +
               "## Security Review\n\n" +
-              "> **Model**: GPT-4o | **Scan Date**: " + today + "\n\n" +
+              "> **Model**: GPT-5.4-mini | **Scan Date**: " + today + "\n\n" +
+              "**Summary**: X issue(s) found — Critical N | High N | Medium N | Low N | Info N\n\n" +
               "---\n\n" +
-              "* Issue: <title>\n" +
-              "* CVSS: <score e.g. 9.8 (Critical) — AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H>\n" +
-              "* Severity: CRITICAL / HIGH / MEDIUM / LOW\n" +
-              "* Certainty: Confirmed / Suspected / Unverified concern\n" +
-              "* Location: <file path>:<line number(s)>\n" +
-              "* Exploit path: <one sentence — how this is exploited in practice>\n" +
-              "* Fix:\n" +
+              "### Critical Issues\n" +
+              "| Severity | File | Line | Issue |\n" +
+              "|----------|------|------|-------|\n" +
+              "| Critical | path/to/file | 42 | Short title |\n\n" +
+              "**[CRIT-1] Issue Title**\n" +
+              "- **Description**: What the risk is and why it is dangerous.\n" +
+              "- **CWE**: CWE-XXX - Name\n" +
+              "- **OWASP**: A0X:2021 - Category\n" +
+              "- **Fix**:\n" +
               "```diff\n" +
               "- insecure code\n" +
               "+ secure code\n" +
               "```\n\n" +
               "---\n\n" +
-              "*(Repeat one block per issue. Do NOT add extra prose, summaries, section headers, or tables outside these blocks.)*\n\n" +
+              "### High Issues\n" +
+              "| Severity | File | Line | Issue |\n" +
+              "|----------|------|------|-------|\n" +
+              "| High | path/to/file | 15 | Short title |\n\n" +
+              "**[HIGH-1] Issue Title**\n" +
+              "- **Description**: What the risk is and why it is dangerous.\n" +
+              "- **CWE**: CWE-XXX - Name\n" +
+              "- **OWASP**: A0X:2021 - Category\n" +
+              "- **Fix**:\n" +
+              "```diff\n" +
+              "- insecure code\n" +
+              "+ secure code\n" +
+              "```\n\n" +
+              "---\n\n" +
+              "### Medium Issues\n" +
+              "| Severity | File | Line | Issue |\n" +
+              "|----------|------|------|-------|\n" +
+              "| Medium | path/to/file | 30 | Short title |\n\n" +
+              "**[MED-1] Issue Title**\n" +
+              "- **Description**: What the risk is and why it is dangerous.\n" +
+              "- **CWE**: CWE-XXX - Name\n" +
+              "- **OWASP**: A0X:2021 - Category\n" +
+              "- **Fix**:\n" +
+              "```diff\n" +
+              "- insecure code\n" +
+              "+ secure code\n" +
+              "```\n\n" +
+              "---\n\n" +
+              "### Low Issues\n" +
+              "| Severity | File | Line | Issue |\n" +
+              "|----------|------|------|-------|\n" +
+              "| Low | path/to/file | 8 | Short title |\n\n" +
+              "**[LOW-1] Issue Title**\n" +
+              "- **Description**: What the risk is and why it is dangerous.\n" +
+              "- **CWE**: CWE-XXX - Name\n" +
+              "- **OWASP**: A0X:2021 - Category\n" +
+              "- **Fix**:\n" +
+              "```diff\n" +
+              "- insecure code\n" +
+              "+ secure code\n" +
+              "```\n\n" +
+              "---\n\n" +
+              "### Info\n" +
+              "| Severity | File | Line | Issue |\n" +
+              "|----------|------|------|-------|\n" +
+              "| Info | path/to/file | 5 | Short title |\n\n" +
+              "**[INFO-1] Issue Title**\n" +
+              "- **Description**: Brief observation and recommended best practice.\n" +
+              "- **CWE**: CWE-XXX - Name (if applicable)\n\n" +
+              "---\n\n" +
+              "### Security Checklist\n" +
+              "*(Always include this section even if no issues found)*\n\n" +
+              "| Vulnerability Class | Status | Notes |\n" +
+              "|---------------------|--------|-------|\n" +
+              "| SQL Injection (SQLi) | Not Found | No raw SQL queries with user input detected |\n" +
+              "| Cross-Site Scripting (XSS) | Not Found | No unsanitized output to HTML detected |\n" +
+              "| Server-Side Request Forgery (SSRF) | Not Found | No outbound requests with user-controlled URLs |\n" +
+              "| Authentication / Auth Bypass | Not Found | Auth checks appear intact |\n" +
+              "| Hardcoded Secrets / API Keys | Not Found | No secrets or tokens found in diff |\n" +
+              "| Insecure Direct Object Reference (IDOR) | Not Found | Access control checks present |\n" +
+              "| Remote Code Execution (RCE) | Not Found | No eval or shell exec with user input |\n" +
+              "| Cross-Site Request Forgery (CSRF) | Not Found | CSRF tokens in place |\n" +
+              "| Open Redirect | Not Found | Redirect targets are validated |\n" +
+              "| Weak Cryptography | Not Found | No weak hash or cipher usage |\n" +
+              "| Broken Access Control | Not Found | Role checks appear correct |\n" +
+              "| Supply Chain / Dependency Risk | Not Found | No suspicious new dependencies |\n\n" +
+              "---\n\n" +
               "> Auto-generated review. Always verify findings manually before acting.\n\n" +
-
-              "FIELD RULES:\n" +
-              "- Use EXACTLY these field names: Issue, CVSS, Severity, Certainty, Location, Exploit path, Fix.\n" +
-              "- Separate each issue block with a `---` divider.\n" +
-              "- Do NOT add section headers (e.g. 'Critical Issues'), summary tables, or checklists.\n" +
-              "- Only if you find ZERO issues after exhaustive analysis, respond with exactly one line:\n" +
-              "  No security issues identified in this diff.\n\n" +
-
-              "PR diff to analyze:\n" +
+              "IMPORTANT:\n" +
+              "- Omit any severity section entirely if zero issues at that level.\n" +
+              "- Never print empty tables.\n" +
+              "- Number issues per group: CRIT-1, CRIT-2, HIGH-1, HIGH-2, MED-1, LOW-1, INFO-1 etc.\n" +
+              "- ALWAYS include the Security Checklist section at the end filled with real observations from the diff.\n\n" +
+              "PR changes to analyze:\n" +
               truncatedDiff;
 
             try {
@@ -145,10 +196,16 @@ jobs:
                   body: JSON.stringify({
                     model: model.name,
                     messages: [
-                      { role: "system", content: systemPrompt },
-                      { role: "user",   content: prompt       }
+                      {
+                        role: "system",
+                        content: systemPrompt
+                      },
+                      {
+                        role: "user",
+                        content: prompt
+                      }
                     ],
-                    temperature: 0.2,   // slightly higher than 0.1 — reduces lazy shortcutting
+                    temperature: 0.1,
                     ...tokenParam
                   })
                 });
@@ -182,11 +239,6 @@ jobs:
 
               const reviewText = data.choices[0].message.content;
 
-              // Detect the intentional clean result — do NOT warn about token
-              // count in this case; the short response is correct behaviour.
-              const NO_ISSUES_PHRASE = 'No security issues identified in this diff.';
-              const isCleanResult = reviewText.trim() === NO_ISSUES_PHRASE;
-
               const usage = data.usage || {};
               console.log('─── Token Usage ───────────────────────────');
               console.log(`  Prompt (input)     : ${usage.prompt_tokens     ?? 'N/A'} tokens`);
@@ -194,29 +246,15 @@ jobs:
               console.log(`  Total              : ${usage.total_tokens      ?? 'N/A'} tokens`);
               console.log('───────────────────────────────────────────');
 
-              // Warn only when output is genuinely short AND it's not the
-              // expected clean-result phrase — that combination means the model
-              // returned something unexpected, not a legitimate clean scan.
-              const outputTooShort = !isCleanResult && (usage.completion_tokens ?? 0) < 300;
-              if (outputTooShort) {
+              if ((usage.completion_tokens ?? 0) < 300) {
                 console.warn('WARNING: Output tokens very low — model may not have done a full review!');
-              }
-
-              // Flag when gpt-4o-mini was used as fallback — lower recall expected.
-              const usedFallback = usedModel !== 'gpt-4o';
-              if (usedFallback) {
-                console.warn(`WARNING: Fell back to ${usedModel} — security recall will be lower than GPT-4o.`);
               }
 
               const footer = [
                 '',
                 '---',
-                wasTruncated
-                  ? '> ⚠️ **WARNING**: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.' : '',
-                outputTooShort
-                  ? '> ⚠️ **WARNING**: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
-                usedFallback
-                  ? `> ⚠️ **WARNING**: Primary model unavailable. Used fallback \`${usedModel}\` — expect lower vulnerability detection.` : '',
+                wasTruncated ? '> WARNING: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.' : '',
+                (usage.completion_tokens ?? 0) < 300 ? '> WARNING: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
                 `> 🤖 **Model used**: \`${usedModel}\``,
                 `> 📊 **Tokens** — Input: \`${usage.prompt_tokens ?? 'N/A'}\` | Output: \`${usage.completion_tokens ?? 'N/A'}\` | Total: \`${usage.total_tokens ?? 'N/A'}\``,
                 `> 📅 **Scanned**: ${today}`
