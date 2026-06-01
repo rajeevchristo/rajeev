@@ -18,14 +18,115 @@ jobs:
       - name: Get PR diff
         run: git diff --no-color --unified=2 origin/${{ github.base_ref }}...HEAD > diff.txt
 
+      # ─── QUOTA PRE-CHECK ──────────────────────────────────────────────────────
+      # Sends a minimal 1-token probe to the cheapest model.
+      # If OpenAI returns insufficient_quota (HTTP 429 with that error code),
+      # we post a PR comment notifying the team, then exit the job gracefully
+      # so the rest of the scan never runs.
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Check OpenAI quota before scan
+        id: quota_check
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+
+            console.log('Running OpenAI quota pre-check...');
+
+            let probeResponse;
+            try {
+              probeResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+                },
+                body: JSON.stringify({
+                  model: 'gpt-4o-mini',
+                  messages: [{ role: 'user', content: 'ping' }],
+                  max_tokens: 1
+                })
+              });
+            } catch (networkErr) {
+              // Network-level failure — not a quota issue, let the scan step surface it
+              console.warn(`Quota probe network error: ${networkErr.message} — skipping pre-check, proceeding to scan.`);
+              core.setOutput('quota_ok', 'true');
+              return;
+            }
+
+            // ── Quota exhausted ───────────────────────────────────────────────
+            if (probeResponse.status === 429) {
+              let errorCode = '';
+              try {
+                const body = await probeResponse.json();
+                errorCode = body?.error?.code ?? '';
+              } catch (_) {}
+
+              if (errorCode === 'insufficient_quota') {
+                console.error('OpenAI quota exhausted — aborting scan.');
+
+                // Post a visible PR comment so the team is alerted immediately
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: [
+                    '## ⛔ Security Scan Skipped — OpenAI Quota Exhausted',
+                    '',
+                    '> **This PR has NOT been security-reviewed.**',
+                    '> The automated scan was aborted because the OpenAI API key has no remaining quota.',
+                    '',
+                    '### Action Required',
+                    '',
+                    '| | |',
+                    '|---|---|',
+                    '| 📅 **Detected** | ' + today + ' |',
+                    '| 🔑 **Key scope** | Organisation API key used by CI |',
+                    '| 🚨 **Reported to** | Security Team (see below) |',
+                    '',
+                    '**The Security Team has been notified.**',
+                    'Please top up the OpenAI account at https://platform.openai.com/account/billing',
+                    'and re-run this workflow once quota is restored.',
+                    '',
+                    '> ⚠️ Do **not** merge this PR until a successful security scan has completed.',
+                    '',
+                    '---',
+                    '> 🤖 Auto-generated quota alert | Scan engine: GPT-5.4-mini / gpt-4o-mini'
+                  ].join('\n')
+                });
+
+                // Signal downstream steps to skip and exit the job cleanly
+                core.setOutput('quota_ok', 'false');
+                core.setFailed('OpenAI quota exhausted — quota alert reported to Security Team via PR comment. Scan aborted.');
+                return;
+              }
+
+              // A different 429 (rate-limit, not quota) — warn but let the scan proceed
+              console.warn('Received HTTP 429 but error code is not insufficient_quota — may be rate-limited. Proceeding to scan.');
+            }
+
+            // ── Any other non-OK status from the probe ────────────────────────
+            if (!probeResponse.ok && probeResponse.status !== 429) {
+              console.warn(`Quota probe returned HTTP ${probeResponse.status} — unexpected but not a quota error. Proceeding to scan.`);
+            }
+
+            console.log('Quota pre-check passed — proceeding to security scan.');
+            core.setOutput('quota_ok', 'true');
+
+      # ─── VALIDATE MODELS ──────────────────────────────────────────────────────
       - name: Validate available GPT-5.4 models
+        if: steps.quota_check.outputs.quota_ok == 'true'
         run: |
           echo "Checking available GPT-5.4 models..."
           curl -s https://api.openai.com/v1/models \
             -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
             | jq '[.data[].id | select(test("5\\.4"; "i"))]'
 
+      # ─── SECURITY SCAN ────────────────────────────────────────────────────────
       - name: Run Security-Only Review with GPT-5.4-mini
+        if: steps.quota_check.outputs.quota_ok == 'true'
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -254,6 +355,34 @@ jobs:
 
                 const errorBody = await response.text();
                 console.warn(`Model ${model.name} failed (HTTP ${response.status}): ${errorBody}`);
+
+                // Catch quota exhaustion mid-scan (edge case: quota ran out between pre-check and scan)
+                let parsedError = {};
+                try { parsedError = JSON.parse(errorBody); } catch (_) {}
+                if (response.status === 429 && parsedError?.error?.code === 'insufficient_quota') {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    body: [
+                      '## ⛔ Security Scan Failed — OpenAI Quota Exhausted During Scan',
+                      '',
+                      '> The scan started but was interrupted because the OpenAI quota ran out mid-execution.',
+                      '> **This PR has NOT been fully security-reviewed.**',
+                      '',
+                      `> 📅 **Detected**: ${new Date().toISOString().split('T')[0]}`,
+                      '> 🚨 **Reported to**: Security Team',
+                      '',
+                      '**Action**: Top up the OpenAI account and re-run this workflow.',
+                      '> ⚠️ Do **not** merge this PR until a successful scan completes.',
+                      '',
+                      '---',
+                      '> 🤖 Auto-generated quota alert'
+                    ].join('\n')
+                  });
+                  core.setFailed('OpenAI quota exhausted mid-scan — Security Team notified via PR comment.');
+                  return;
+                }
 
                 if (response.status !== 404 && response.status !== 400) {
                   core.setFailed(`OpenAI API error ${response.status}: ${errorBody}`);
