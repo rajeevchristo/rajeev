@@ -72,26 +72,44 @@ jobs:
               "STRICT RULES:\n" +
               "- Report ONLY real security vulnerabilities (OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks, etc.).\n" +
               "- NEVER comment on code style, performance, tests, maintainability, or anything non-security.\n" +
-              "- Classify every issue using EXACTLY one of: Critical, High, Medium, Low, Info.\n" +
+              "- For every issue, provide a CVSS v3.1 Base Score (0.0–10.0) with the full CVSS vector string (e.g. AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H).\n" +
+              "- Severity MUST be derived strictly from the CVSS Base Score using these thresholds:\n" +
+              "    Critical : CVSS 9.0–10.0\n" +
+              "    High     : CVSS 7.0–8.9\n" +
+              "    Medium   : CVSS 4.0–6.9\n" +
+              "    Low      : CVSS 0.1–3.9\n" +
+              "    Info     : CVSS 0.0 (best-practice only, no exploitable vulnerability)\n" +
+              "- For every issue, provide a Certainty rating using EXACTLY one of: Confirmed | Likely | Possible | Unlikely\n" +
+              "    Confirmed : Vulnerability is definitively present from the code alone (e.g. hardcoded secret, direct SQLi).\n" +
+              "    Likely    : Strong indicators present; exploitability depends on minor runtime conditions.\n" +
+              "    Possible  : Suspicious pattern that could be vulnerable depending on context not visible in the diff.\n" +
+              "    Unlikely  : Low-confidence finding; included for awareness, may be a false positive.\n" +
               "- You MUST analyze every single changed line deeply and trace data flows end to end.\n" +
               "- Even if no issues are found, you MUST include a Security Checklist section listing every vulnerability class you checked and one sentence explaining why each was ruled out.\n" +
               "- Never return 0 issues on a diff larger than 100 lines without providing the full checklist.\n\n" +
-              "SEVERITY DEFINITIONS:\n" +
-              "- Critical : Immediate exploitation possible — RCE, SQLi, hardcoded secrets, auth bypass.\n" +
-              "- High     : Significant impact, likely exploitable — SSRF, IDOR, privilege escalation, XSS.\n" +
-              "- Medium   : Moderate impact, needs specific conditions — open redirect, weak crypto, missing rate-limit, CSRF.\n" +
-              "- Low      : Minor risk, limited impact — verbose errors, missing security headers, overly broad CORS.\n" +
-              "- Info     : Best-practice observations — dependency pinning, minor config notes.\n\n" +
+              "CVSS v3.1 SCORING GUIDANCE:\n" +
+              "- Always score based on the worst-case realistic exploit scenario.\n" +
+              "- Use the full CVSS vector: AV (Attack Vector), AC (Attack Complexity), PR (Privileges Required), UI (User Interaction), S (Scope), C (Confidentiality), I (Integrity), A (Availability).\n" +
+              "- Provide the numeric score AND the vector string for every issue.\n\n" +
+              "CERTAINTY GUIDANCE:\n" +
+              "- Confirmed: You can point to the exact vulnerable line(s) with no ambiguity.\n" +
+              "- Likely: The pattern is clearly risky but full exploit depends on calling context or config.\n" +
+              "- Possible: Suspicious but requires assumptions about code outside the diff.\n" +
+              "- Unlikely: Edge-case or theoretical risk; flag it but don't alarm the team.\n\n" +
               "OUTPUT FORMAT (follow exactly):\n\n" +
               "## Security Review\n\n" +
               "> **Model**: GPT-5.4-mini | **Scan Date**: " + today + "\n\n" +
               "**Summary**: X issue(s) found — Critical N | High N | Medium N | Low N | Info N\n\n" +
               "---\n\n" +
               "### Critical Issues\n" +
-              "| Severity | File | Line | Issue |\n" +
-              "|----------|------|------|-------|\n" +
-              "| Critical | path/to/file | 42 | Short title |\n\n" +
+              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
+              "|----------|------------|-------------|-----------|------|------|-------|\n" +
+              "| Critical | 9.8 | AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H | Confirmed | path/to/file | 42 | Short title |\n\n" +
               "**[CRIT-1] Issue Title**\n" +
+              "- **Severity**: Critical\n" +
+              "- **CVSS Base Score**: 9.8\n" +
+              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\n" +
+              "- **Certainty**: Confirmed\n" +
               "- **Description**: What the risk is and why it is dangerous.\n" +
               "- **CWE**: CWE-XXX - Name\n" +
               "- **OWASP**: A0X:2021 - Category\n" +
@@ -102,10 +120,14 @@ jobs:
               "```\n\n" +
               "---\n\n" +
               "### High Issues\n" +
-              "| Severity | File | Line | Issue |\n" +
-              "|----------|------|------|-------|\n" +
-              "| High | path/to/file | 15 | Short title |\n\n" +
+              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
+              "|----------|------------|-------------|-----------|------|------|-------|\n" +
+              "| High | 7.5 | AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N | Likely | path/to/file | 15 | Short title |\n\n" +
               "**[HIGH-1] Issue Title**\n" +
+              "- **Severity**: High\n" +
+              "- **CVSS Base Score**: 7.5\n" +
+              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\n" +
+              "- **Certainty**: Likely\n" +
               "- **Description**: What the risk is and why it is dangerous.\n" +
               "- **CWE**: CWE-XXX - Name\n" +
               "- **OWASP**: A0X:2021 - Category\n" +
@@ -116,10 +138,14 @@ jobs:
               "```\n\n" +
               "---\n\n" +
               "### Medium Issues\n" +
-              "| Severity | File | Line | Issue |\n" +
-              "|----------|------|------|-------|\n" +
-              "| Medium | path/to/file | 30 | Short title |\n\n" +
+              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
+              "|----------|------------|-------------|-----------|------|------|-------|\n" +
+              "| Medium | 5.3 | AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N | Possible | path/to/file | 30 | Short title |\n\n" +
               "**[MED-1] Issue Title**\n" +
+              "- **Severity**: Medium\n" +
+              "- **CVSS Base Score**: 5.3\n" +
+              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\n" +
+              "- **Certainty**: Possible\n" +
               "- **Description**: What the risk is and why it is dangerous.\n" +
               "- **CWE**: CWE-XXX - Name\n" +
               "- **OWASP**: A0X:2021 - Category\n" +
@@ -130,10 +156,14 @@ jobs:
               "```\n\n" +
               "---\n\n" +
               "### Low Issues\n" +
-              "| Severity | File | Line | Issue |\n" +
-              "|----------|------|------|-------|\n" +
-              "| Low | path/to/file | 8 | Short title |\n\n" +
+              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
+              "|----------|------------|-------------|-----------|------|------|-------|\n" +
+              "| Low | 3.1 | AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N | Unlikely | path/to/file | 8 | Short title |\n\n" +
               "**[LOW-1] Issue Title**\n" +
+              "- **Severity**: Low\n" +
+              "- **CVSS Base Score**: 3.1\n" +
+              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N\n" +
+              "- **Certainty**: Unlikely\n" +
               "- **Description**: What the risk is and why it is dangerous.\n" +
               "- **CWE**: CWE-XXX - Name\n" +
               "- **OWASP**: A0X:2021 - Category\n" +
@@ -144,36 +174,42 @@ jobs:
               "```\n\n" +
               "---\n\n" +
               "### Info\n" +
-              "| Severity | File | Line | Issue |\n" +
-              "|----------|------|------|-------|\n" +
-              "| Info | path/to/file | 5 | Short title |\n\n" +
+              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
+              "|----------|------------|-------------|-----------|------|------|-------|\n" +
+              "| Info | 0.0 | N/A | Confirmed | path/to/file | 5 | Short title |\n\n" +
               "**[INFO-1] Issue Title**\n" +
+              "- **Severity**: Info\n" +
+              "- **CVSS Base Score**: 0.0 (Best-practice observation, not exploitable)\n" +
+              "- **Certainty**: Confirmed\n" +
               "- **Description**: Brief observation and recommended best practice.\n" +
               "- **CWE**: CWE-XXX - Name (if applicable)\n\n" +
               "---\n\n" +
               "### Security Checklist\n" +
               "*(Always include this section even if no issues found)*\n\n" +
-              "| Vulnerability Class | Status | Notes |\n" +
-              "|---------------------|--------|-------|\n" +
-              "| SQL Injection (SQLi) | Not Found | No raw SQL queries with user input detected |\n" +
-              "| Cross-Site Scripting (XSS) | Not Found | No unsanitized output to HTML detected |\n" +
-              "| Server-Side Request Forgery (SSRF) | Not Found | No outbound requests with user-controlled URLs |\n" +
-              "| Authentication / Auth Bypass | Not Found | Auth checks appear intact |\n" +
-              "| Hardcoded Secrets / API Keys | Not Found | No secrets or tokens found in diff |\n" +
-              "| Insecure Direct Object Reference (IDOR) | Not Found | Access control checks present |\n" +
-              "| Remote Code Execution (RCE) | Not Found | No eval or shell exec with user input |\n" +
-              "| Cross-Site Request Forgery (CSRF) | Not Found | CSRF tokens in place |\n" +
-              "| Open Redirect | Not Found | Redirect targets are validated |\n" +
-              "| Weak Cryptography | Not Found | No weak hash or cipher usage |\n" +
-              "| Broken Access Control | Not Found | Role checks appear correct |\n" +
-              "| Supply Chain / Dependency Risk | Not Found | No suspicious new dependencies |\n\n" +
+              "| Vulnerability Class | Status | CVSS Range if Found | Notes |\n" +
+              "|---------------------|--------|---------------------|-------|\n" +
+              "| SQL Injection (SQLi) | Not Found | Critical (9.0–10.0) | No raw SQL queries with user input detected |\n" +
+              "| Cross-Site Scripting (XSS) | Not Found | High (7.0–8.9) | No unsanitized output to HTML detected |\n" +
+              "| Server-Side Request Forgery (SSRF) | Not Found | High (7.0–8.9) | No outbound requests with user-controlled URLs |\n" +
+              "| Authentication / Auth Bypass | Not Found | Critical (9.0–10.0) | Auth checks appear intact |\n" +
+              "| Hardcoded Secrets / API Keys | Not Found | Critical (9.0–10.0) | No secrets or tokens found in diff |\n" +
+              "| Insecure Direct Object Reference (IDOR) | Not Found | High (7.0–8.9) | Access control checks present |\n" +
+              "| Remote Code Execution (RCE) | Not Found | Critical (9.0–10.0) | No eval or shell exec with user input |\n" +
+              "| Cross-Site Request Forgery (CSRF) | Not Found | Medium (4.0–6.9) | CSRF tokens in place |\n" +
+              "| Open Redirect | Not Found | Medium (4.0–6.9) | Redirect targets are validated |\n" +
+              "| Weak Cryptography | Not Found | Medium (4.0–6.9) | No weak hash or cipher usage |\n" +
+              "| Broken Access Control | Not Found | High (7.0–8.9) | Role checks appear correct |\n" +
+              "| Supply Chain / Dependency Risk | Not Found | High (7.0–8.9) | No suspicious new dependencies |\n\n" +
               "---\n\n" +
-              "> Auto-generated review. Always verify findings manually before acting.\n\n" +
+              "> Auto-generated review. Always verify findings manually before acting. CVSS scores are best-effort estimates based on static analysis.\n\n" +
               "IMPORTANT:\n" +
               "- Omit any severity section entirely if zero issues at that level.\n" +
               "- Never print empty tables.\n" +
               "- Number issues per group: CRIT-1, CRIT-2, HIGH-1, HIGH-2, MED-1, LOW-1, INFO-1 etc.\n" +
-              "- ALWAYS include the Security Checklist section at the end filled with real observations from the diff.\n\n" +
+              "- Severity label MUST always match the CVSS score band — never override this with subjective judgment.\n" +
+              "- ALWAYS include the Security Checklist section at the end filled with real observations from the diff.\n" +
+              "- ALWAYS include Certainty for every issue. Never omit it.\n" +
+              "- For Info items with CVSS 0.0, you may write N/A for the vector string.\n\n" +
               "PR changes to analyze:\n" +
               truncatedDiff;
 
@@ -253,11 +289,12 @@ jobs:
               const footer = [
                 '',
                 '---',
-                wasTruncated ? '> WARNING: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.' : '',
-                (usage.completion_tokens ?? 0) < 300 ? '> WARNING: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
+                wasTruncated ? '> ⚠️ WARNING: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.' : '',
+                (usage.completion_tokens ?? 0) < 300 ? '> ⚠️ WARNING: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
                 `> 🤖 **Model used**: \`${usedModel}\``,
                 `> 📊 **Tokens** — Input: \`${usage.prompt_tokens ?? 'N/A'}\` | Output: \`${usage.completion_tokens ?? 'N/A'}\` | Total: \`${usage.total_tokens ?? 'N/A'}\``,
-                `> 📅 **Scanned**: ${today}`
+                `> 📅 **Scanned**: ${today}`,
+                `> 🔢 **Scoring**: CVSS v3.1 Base Score | Severity derived from CVSS band | Certainty: Confirmed / Likely / Possible / Unlikely`
               ].filter(Boolean).join('\n');
 
               await github.rest.issues.createComment({
