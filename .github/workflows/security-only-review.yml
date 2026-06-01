@@ -25,7 +25,57 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
             | jq '[.data[].id | select(test("5\\.4"; "i"))]'
 
+      - name: Check OpenAI quota
+        id: quota_check
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const response = await fetch("https://api.openai.com/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+              },
+              body: JSON.stringify({
+                model: "gpt-4o-mini",
+                messages: [{ role: "user", content: "ping" }],
+                max_tokens: 1
+              })
+            });
+
+            if (response.ok) {
+              console.log("Quota check passed.");
+              core.setOutput("quota_ok", "true");
+              return;
+            }
+
+            const errorBody = await response.json().catch(() => ({}));
+            const errorCode = errorBody?.error?.code ?? "";
+
+            if (errorCode === "insufficient_quota") {
+              console.warn("OpenAI quota exhausted — skipping security review.");
+              core.setOutput("quota_ok", "false");
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: [
+                  "## Security Review — Skipped ⚠️",
+                  "",
+                  "> **Reason**: The OpenAI API key has exceeded its quota (`insufficient_quota`).",
+                  "> Reported to security team."
+                ].join("\n")
+              });
+            } else {
+              console.warn(`Quota check failed with unexpected error (HTTP ${response.status}): ${JSON.stringify(errorBody)}`);
+              core.setOutput("quota_ok", "false");
+            }
+
       - name: Run Security-Only Review with GPT-5.4-mini
+        if: steps.quota_check.outputs.quota_ok == 'true'
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -252,11 +302,29 @@ jobs:
                   break;
                 }
 
-                const errorBody = await response.text();
-                console.warn(`Model ${model.name} failed (HTTP ${response.status}): ${errorBody}`);
+                const errorBody = await response.json().catch(() => ({}));
+                const errorCode = errorBody?.error?.code ?? "";
+                console.warn(`Model ${model.name} failed (HTTP ${response.status}): ${JSON.stringify(errorBody)}`);
+
+                if (errorCode === "insufficient_quota") {
+                  console.warn("OpenAI quota exhausted mid-scan — posting notice and exiting.");
+
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    body: [
+                      "## Security Review — Skipped ⚠️",
+                      "",
+                      "> **Reason**: The OpenAI API key has exceeded its quota (`insufficient_quota`).",
+                      "> Reported to security team."
+                    ].join("\n")
+                  });
+                  return;
+                }
 
                 if (response.status !== 404 && response.status !== 400) {
-                  core.setFailed(`OpenAI API error ${response.status}: ${errorBody}`);
+                  core.setFailed(`OpenAI API error ${response.status}: ${JSON.stringify(errorBody)}`);
                   return;
                 }
               }
