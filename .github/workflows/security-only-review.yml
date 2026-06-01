@@ -30,8 +30,17 @@ jobs:
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         with:
           script: |
+            const sendSlackAlert = async (message) => {
+              await fetch(process.env.SLACK_WEBHOOK, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: message })
+              });
+            };
+
             const response = await fetch("https://api.openai.com/v1/chat/completions", {
               method: "POST",
               headers: {
@@ -70,6 +79,14 @@ jobs:
                 ].join("\n")
               });
 
+              await sendSlackAlert(
+                `⚠️ *Security Review Skipped — OpenAI Quota Exhausted*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: OpenAI API key has exceeded its quota (\`insufficient_quota\`).\n` +
+                `> *Action*: Top up the OpenAI account or rotate the API key stored in \`OPENAI_API_KEY\` secret.`
+              );
+
               core.setFailed("Security review skipped: OpenAI quota exhausted.");
             } else {
               console.warn(`Quota check failed with unexpected error (HTTP ${response.status}): ${JSON.stringify(errorBody)}`);
@@ -82,6 +99,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         with:
           script: |
             const fs = require('fs');
@@ -96,6 +114,14 @@ jobs:
               { name: 'gpt-4o-mini',   useCompletionTokens: false }
             ];
             // ───────────────────────────────────────────────────────────
+
+            const sendSlackAlert = async (message) => {
+              await fetch(process.env.SLACK_WEBHOOK, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: message })
+              });
+            };
 
             const wasTruncated = rawDiff.length > MAX_DIFF_CHARS;
 
@@ -323,6 +349,14 @@ jobs:
                       "> Reported to security team."
                     ].join("\n")
                   });
+
+                  await sendSlackAlert(
+                    `⚠️ *Security Review Skipped — OpenAI Quota Exhausted*\n` +
+                    `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                    `> *PR*: #${context.issue.number}\n` +
+                    `> *Reason*: OpenAI API key has exceeded its quota (\`insufficient_quota\`) during scan.\n` +
+                    `> *Action*: Top up the OpenAI account or rotate the API key stored in \`OPENAI_API_KEY\` secret.`
+                  );
 
                   core.setFailed("Security review skipped: OpenAI quota exhausted.");
                   return;
