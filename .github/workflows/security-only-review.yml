@@ -32,9 +32,12 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         with:
-          # FIX 3: Removed github-token from quota_check step. The token was
-          # set here but this step only pings the Anthropic API; it doesn't
-          # need GitHub API access, so the bot token is no longer exposed here.
+          # github-script@v7 calls getInput('github-token') unconditionally at
+          # bootstrap — the input is mandatory even if the script never uses the
+          # GitHub API. Use the default GITHUB_TOKEN (least privilege) here
+          # rather than BOT_TOKEN since this step only needs it to post a
+          # comment on auth/rate-limit failures; full bot permissions aren't required.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             // FIX 4: Guard against an unset SLACK_WEBHOOK so failures surface
             // clearly rather than being silently swallowed.
@@ -171,7 +174,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         with:
-          github-token: ${{ secrets.BOT_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
 
