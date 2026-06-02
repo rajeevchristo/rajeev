@@ -91,6 +91,15 @@ jobs:
             } else {
               console.warn(`Quota check failed with unexpected error (HTTP ${response.status}): ${JSON.stringify(errorBody)}`);
               core.setOutput("quota_ok", "false");
+
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Quota Check Error*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Unexpected error during quota check (HTTP ${response.status}).\n` +
+                `> *Detail*: \`${JSON.stringify(errorBody)}\``
+              );
+
               core.setFailed(`Quota check failed with unexpected error (HTTP ${response.status}).`);
             }
 
@@ -116,12 +125,19 @@ jobs:
             // ───────────────────────────────────────────────────────────
 
             const sendSlackAlert = async (message) => {
-              await fetch(process.env.SLACK_WEBHOOK, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: message })
-              });
+              try {
+                await fetch(process.env.SLACK_WEBHOOK, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: message })
+                });
+              } catch (slackErr) {
+                console.warn(`Slack alert failed: ${slackErr.message}`);
+              }
             };
+
+            const prLink = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`;
+            const repoLabel = `${context.repo.owner}/${context.repo.repo}`;
 
             const wasTruncated = rawDiff.length > MAX_DIFF_CHARS;
 
@@ -352,10 +368,10 @@ jobs:
 
                   await sendSlackAlert(
                     `⚠️ *Security Review Skipped — OpenAI Quota Exhausted*\n` +
-                    `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
-                    `> *PR*: #${context.issue.number}\n` +
-                    `> *Reason*: OpenAI API key has exceeded its quota (\`insufficient_quota\`) during scan.\n` +
-                    `> *Action*: Top up the OpenAI account or rotate the API key stored in \`OPENAI_API_KEY\` secret.`
+                    `> *Repo*: ${repoLabel}\n` +
+                    `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                    `> *Reason*: OpenAI API key exceeded its quota (\`insufficient_quota\`) during scan.\n` +
+                    `> *Action*: Top up the OpenAI account or rotate the \`OPENAI_API_KEY\` secret.`
                   );
 
                   core.setFailed("Security review skipped: OpenAI quota exhausted.");
@@ -363,12 +379,29 @@ jobs:
                 }
 
                 if (response.status !== 404 && response.status !== 400) {
+                  await sendSlackAlert(
+                    `🔴 *Security Review Failed — Unexpected OpenAI API Error*\n` +
+                    `> *Repo*: ${repoLabel}\n` +
+                    `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                    `> *Model*: \`${model.name}\`\n` +
+                    `> *HTTP Status*: ${response.status}\n` +
+                    `> *Detail*: \`${JSON.stringify(errorBody)}\``
+                  );
+
                   core.setFailed(`OpenAI API error ${response.status}: ${JSON.stringify(errorBody)}`);
                   return;
                 }
               }
 
               if (!response || !response.ok) {
+                await sendSlackAlert(
+                  `🔴 *Security Review Failed — All Model Fallbacks Exhausted*\n` +
+                  `> *Repo*: ${repoLabel}\n` +
+                  `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Reason*: Every model in the fallback list was tried and all failed.\n` +
+                  `> *Models tried*: ${MODELS.map(m => m.name).join(', ')}`
+                );
+
                 core.setFailed('All model fallbacks exhausted. Could not complete security review.');
                 return;
               }
@@ -376,6 +409,14 @@ jobs:
               const data = await response.json();
 
               if (!data.choices?.[0]?.message?.content) {
+                await sendSlackAlert(
+                  `🔴 *Security Review Failed — Unexpected Response Structure*\n` +
+                  `> *Repo*: ${repoLabel}\n` +
+                  `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Model*: \`${usedModel}\`\n` +
+                  `> *Detail*: OpenAI returned an unexpected response with no content.`
+                );
+
                 core.setFailed(`Unexpected OpenAI response structure: ${JSON.stringify(data)}`);
                 return;
               }
@@ -389,15 +430,87 @@ jobs:
               console.log(`  Total              : ${usage.total_tokens      ?? 'N/A'} tokens`);
               console.log('───────────────────────────────────────────');
 
-              if ((usage.completion_tokens ?? 0) < 300) {
+              const outputTooShort = (usage.completion_tokens ?? 0) < 300;
+              if (outputTooShort) {
                 console.warn('WARNING: Output tokens very low — model may not have done a full review!');
               }
 
+              // ─── Parse findings from review text ───────────────────
+              const severityGroups = { Critical: [], High: [], Medium: [], Low: [], Info: [] };
+              const findingRegex = /\*\*\[(CRIT|HIGH|MED|LOW|INFO)-\d+\]\s(.+?)\*\*/g;
+              const severityMap = { CRIT: 'Critical', HIGH: 'High', MED: 'Medium', LOW: 'Low', INFO: 'Info' };
+              let match;
+              while ((match = findingRegex.exec(reviewText)) !== null) {
+                const sev = severityMap[match[1]];
+                if (sev) severityGroups[sev].push(match[2].trim());
+              }
+
+              const totalFindings = Object.values(severityGroups).reduce((s, a) => s + a.length, 0);
+
+              // ─── Build Slack findings summary ──────────────────────
+              const summaryLines = [
+                totalFindings === 0
+                  ? `✅ *Security Review Complete — No Findings*`
+                  : `🔎 *Security Review Complete — ${totalFindings} Finding(s) Found*`,
+                `> *Repo*: ${repoLabel}`,
+                `> *PR*: <${prLink}|#${context.issue.number}>`,
+                `> *Model*: \`${usedModel}\``,
+                `> *Scanned*: ${today}`,
+                `> *Summary*: Critical: ${severityGroups.Critical.length} | High: ${severityGroups.High.length} | Medium: ${severityGroups.Medium.length} | Low: ${severityGroups.Low.length} | Info: ${severityGroups.Info.length}`,
+              ];
+
+              if (totalFindings > 0) {
+                summaryLines.push('');
+                summaryLines.push('*Findings:*');
+                summaryLines.push('```');
+                summaryLines.push('Severity   | Finding');
+                summaryLines.push('-----------|' + '-'.repeat(50));
+                for (const [sev, names] of Object.entries(severityGroups)) {
+                  for (const name of names) {
+                    summaryLines.push(`${sev.padEnd(10)} | ${name}`);
+                  }
+                }
+                summaryLines.push('```');
+              }
+
+              if (wasTruncated) {
+                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed.`);
+              }
+
+              if (outputTooShort) {
+                summaryLines.push(`> ⚠️ *Warning*: Model output was very short — review may be incomplete.`);
+              }
+
+              await sendSlackAlert(summaryLines.join('\n'));
+
+              // ─── Post warnings to Slack separately if needed ───────
+              if (wasTruncated) {
+                await sendSlackAlert(
+                  `⚠️ *Diff Truncated Warning*\n` +
+                  `> *Repo*: ${repoLabel}\n` +
+                  `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Reason*: PR diff exceeded ${MAX_DIFF_CHARS.toLocaleString()} characters and was truncated.\n` +
+                  `> *Action*: Some changes were NOT reviewed. Consider splitting this PR into smaller ones.`
+                );
+              }
+
+              if (outputTooShort) {
+                await sendSlackAlert(
+                  `⚠️ *Incomplete Review Warning — Output Too Short*\n` +
+                  `> *Repo*: ${repoLabel}\n` +
+                  `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Model*: \`${usedModel}\`\n` +
+                  `> *Output tokens*: ${usage.completion_tokens ?? 'N/A'} (threshold: 300)\n` +
+                  `> *Action*: Re-run the workflow or review this PR manually.`
+                );
+              }
+
+              // ─── Post PR comment ───────────────────────────────────
               const footer = [
                 '',
                 '---',
                 wasTruncated ? '> ⚠️ WARNING: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.' : '',
-                (usage.completion_tokens ?? 0) < 300 ? '> ⚠️ WARNING: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
+                outputTooShort ? '> ⚠️ WARNING: Model output was very short — review may be incomplete. Re-run or review manually.' : '',
                 `> 🤖 **Model used**: \`${usedModel}\``,
                 `> 📊 **Tokens** — Input: \`${usage.prompt_tokens ?? 'N/A'}\` | Output: \`${usage.completion_tokens ?? 'N/A'}\` | Total: \`${usage.total_tokens ?? 'N/A'}\``,
                 `> 📅 **Scanned**: ${today}`,
@@ -414,5 +527,12 @@ jobs:
               console.log(`Security review posted successfully on PR #${context.issue.number}`);
 
             } catch (error) {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Script Crash*\n` +
+                `> *Repo*: ${repoLabel}\n` +
+                `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                `> *Error*: ${error.message}`
+              );
+
               core.setFailed(`Script error: ${error.message}\n${error.stack}`);
             }
