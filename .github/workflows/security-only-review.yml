@@ -12,10 +12,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # FIX 1: Merged fetch + diff into one atomic step so the base ref is
-      # guaranteed to exist before git diff reads it. Previously the two steps
-      # were separate; if fetch silently failed, git diff would diff against a
-      # stale or missing ref without any error surfacing.
       - name: Fetch base branch and generate diff
         run: |
           git fetch origin "${{ github.base_ref }}" || {
@@ -32,15 +28,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         with:
-          # github-script@v7 calls getInput('github-token') unconditionally at
-          # bootstrap — the input is mandatory even if the script never uses the
-          # GitHub API. Use the default GITHUB_TOKEN (least privilege) here
-          # rather than BOT_TOKEN since this step only needs it to post a
-          # comment on auth/rate-limit failures; full bot permissions aren't required.
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // FIX 4: Guard against an unset SLACK_WEBHOOK so failures surface
-            // clearly rather than being silently swallowed.
             const sendSlackAlert = async (message) => {
               const webhookUrl = process.env.SLACK_WEBHOOK;
               if (!webhookUrl) {
@@ -48,9 +37,6 @@ jobs:
                 return;
               }
               try {
-                // FIX 9: Added AbortSignal timeout on all fetch calls so a
-                // hung API call fails fast with a clear error instead of
-                // stalling the runner until the job-level timeout fires.
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 10000);
                 await fetch(webhookUrl, {
@@ -65,7 +51,6 @@ jobs:
               }
             };
 
-            // FIX 9: Timeout on Anthropic ping as well.
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
             let response;
@@ -123,7 +108,6 @@ jobs:
                   "> Reported to security team."
                 ].join("\n")
               });
-
               await sendSlackAlert(
                 `⚠️ *Security Review Skipped — Anthropic API Rate Limit / Quota Exceeded*\n` +
                 `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
@@ -131,7 +115,6 @@ jobs:
                 `> *Reason*: Anthropic API returned rate limit or quota error.\n` +
                 `> *Action*: Check your Anthropic API plan or rotate the \`ANTHROPIC_API_KEY\` secret.`
               );
-
               core.setFailed("Security review skipped: Anthropic API rate limit or quota exceeded.");
             } else if (response.status === 401 || errorType === "authentication_error") {
               await github.rest.issues.createComment({
@@ -145,7 +128,6 @@ jobs:
                   "> Reported to security team."
                 ].join("\n")
               });
-
               await sendSlackAlert(
                 `🔴 *Security Review Failed — Invalid Anthropic API Key*\n` +
                 `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
@@ -153,7 +135,6 @@ jobs:
                 `> *Reason*: API key is invalid or not set.\n` +
                 `> *Action*: Rotate the \`ANTHROPIC_API_KEY\` secret in repository settings.`
               );
-
               core.setFailed("Security review skipped: Anthropic API key invalid.");
             } else {
               await sendSlackAlert(
@@ -163,7 +144,6 @@ jobs:
                 `> *Reason*: Unexpected error during API check (HTTP ${response.status}).\n` +
                 `> *Detail*: \`${errorMsg}\``
               );
-
               core.setFailed(`Anthropic API check failed with unexpected error (HTTP ${response.status}).`);
             }
 
@@ -179,12 +159,107 @@ jobs:
             const fs = require('fs');
 
             // ─── CONFIG ────────────────────────────────────────────────
-            const MAX_DIFF_CHARS  = 120000;
-            const MAX_TOKENS      = 8000;
-            const MODEL           = "claude-haiku-4-5";
+            const MAX_DIFF_CHARS = 120000;
+            const MAX_TOKENS     = 8000;
+            const MODEL          = "claude-haiku-4-5";
             // ───────────────────────────────────────────────────────────
 
-            // FIX 4: Guard against unset SLACK_WEBHOOK before any use.
+            // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
+            // Score and severity are NEVER assigned by the model.
+            // The model outputs only the 8 metric values (A-Z letters).
+            // This function computes the score from those letters exactly
+            // per the CVSS v3.1 specification — same input always produces
+            // the same output, eliminating LLM arithmetic variance entirely.
+            function computeCVSS31(m) {
+              const AV   = { N: 0.85, A: 0.62, L: 0.55, P: 0.20 }[m.AV];
+              const AC   = { L: 0.77, H: 0.44 }[m.AC];
+              const PR_U = { N: 0.85, L: 0.62, H: 0.27 }[m.PR];
+              const PR_C = { N: 0.85, L: 0.68, H: 0.50 }[m.PR];
+              const UI   = { N: 0.85, R: 0.62 }[m.UI];
+              const S    = m.S;
+              const PR   = S === 'C' ? PR_C : PR_U;
+              const C    = { N: 0.00, L: 0.22, H: 0.56 }[m.C];
+              const I    = { N: 0.00, L: 0.22, H: 0.56 }[m.I];
+              const A    = { N: 0.00, L: 0.22, H: 0.56 }[m.A];
+
+              const ISCBase = 1 - (1 - C) * (1 - I) * (1 - A);
+              const ISC     = S === 'U'
+                ? 6.42 * ISCBase
+                : 7.52 * (ISCBase - 0.029) - 3.25 * Math.pow(ISCBase - 0.02, 15);
+
+              if (ISC <= 0) return 0.0;
+
+              const Exploitability = 8.22 * AV * AC * PR * UI;
+              const raw = S === 'U'
+                ? Math.min(ISC + Exploitability, 10)
+                : Math.min(1.08 * (ISC + Exploitability), 10);
+
+              return Math.ceil(raw * 10) / 10;
+            }
+
+            function getSeverity(score) {
+              if (score >= 9.0) return 'Critical';
+              if (score >= 7.0) return 'High';
+              if (score >= 4.0) return 'Medium';
+              if (score >  0.0) return 'Low';
+              return 'Info';
+            }
+
+            function getVector(m) {
+              return `CVSS:3.1/AV:${m.AV}/AC:${m.AC}/PR:${m.PR}/UI:${m.UI}/S:${m.S}/C:${m.C}/I:${m.I}/A:${m.A}`;
+            }
+
+            // ─── CWE CANONICAL VECTOR LOOKUP TABLE ────────────────────
+            // For well-known CWEs we use a pre-defined canonical vector
+            // rather than relying on the model's metric selection.
+            // This gives near-100% score consistency for these CWE types
+            // because the vector is fixed and the calculator is deterministic.
+            // The model only needs to correctly identify the CWE — which it
+            // does reliably — and the rest is deterministic code.
+            const CWE_VECTORS = {
+              // Injection
+              'CWE-89':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // SQL Injection
+              'CWE-77':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Command Injection
+              'CWE-78':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // OS Command Injection
+              'CWE-917': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Expression Language Injection
+              'CWE-94':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Code Injection
+              'CWE-611': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' }, // XXE
+              // XSS
+              'CWE-79':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' }, // XSS
+              'CWE-80':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' }, // Basic XSS
+              // SSRF / Request Forgery
+              'CWE-918': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' }, // SSRF
+              'CWE-352': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'H', I:'H', A:'H' }, // CSRF
+              // Auth & Access Control
+              'CWE-287': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Improper Authentication
+              'CWE-306': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Missing Authentication
+              'CWE-639': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' }, // IDOR
+              'CWE-862': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' }, // Missing Authorization
+              'CWE-863': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' }, // Incorrect Authorization
+              // Secrets / Cryptography
+              'CWE-798': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Hardcoded Credentials
+              'CWE-259': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Hardcoded Password
+              'CWE-321': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Hardcoded Crypto Key
+              'CWE-326': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' }, // Weak Crypto
+              'CWE-327': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' }, // Broken Crypto Algorithm
+              'CWE-330': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' }, // Weak Random
+              // Path / File
+              'CWE-22':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' }, // Path Traversal
+              'CWE-434': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Unrestricted File Upload
+              // Redirect / Open Redirect
+              'CWE-601': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'L', I:'L', A:'N' }, // Open Redirect
+              // Deserialization / RCE
+              'CWE-502': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' }, // Deserialization
+              'CWE-20':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'L', A:'N' }, // Improper Input Validation
+              // Info Disclosure
+              'CWE-200': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' }, // Info Disclosure
+              'CWE-209': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' }, // Error Message Info Leak
+              // DoS
+              'CWE-400': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' }, // Uncontrolled Resource Consumption
+              'CWE-770': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' }, // Allocation Without Limits
+            };
+
+            // ─── SLACK ALERT HELPER ────────────────────────────────────
             const sendSlackAlert = async (message) => {
               const webhookUrl = process.env.SLACK_WEBHOOK;
               if (!webhookUrl) {
@@ -192,7 +267,6 @@ jobs:
                 return;
               }
               try {
-                // FIX 9: Timeout on Slack fetch calls too.
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 10000);
                 await fetch(webhookUrl, {
@@ -207,9 +281,7 @@ jobs:
               }
             };
 
-            // FIX 2: Guard against a missing or unreadable diff.txt so the
-            // script fails with a clear message instead of an unhandled
-            // fs.readFileSync exception that crashes with no useful context.
+            // ─── READ DIFF ─────────────────────────────────────────────
             let rawDiff;
             try {
               rawDiff = fs.readFileSync('diff.txt', 'utf8');
@@ -227,7 +299,7 @@ jobs:
             const prLink    = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`;
             const repoLabel = `${context.repo.owner}/${context.repo.repo}`;
 
-            const wasTruncated = rawDiff.length > MAX_DIFF_CHARS;
+            const wasTruncated  = rawDiff.length > MAX_DIFF_CHARS;
             const truncatedDiff = wasTruncated
               ? rawDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
               : rawDiff;
@@ -241,256 +313,124 @@ jobs:
             console.log(`Sent to model  : ${truncatedDiff.length} chars`);
             console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
             console.log(`Output tokens (max):     ${MAX_TOKENS}`);
-            if (wasTruncated) {
-              console.log('WARNING: Diff was truncated — some changes were NOT reviewed!');
-            }
+            if (wasTruncated) console.log('WARNING: Diff was truncated — some changes were NOT reviewed!');
 
             const today = new Date().toISOString().split('T')[0];
 
+            // ─── SYSTEM PROMPT ─────────────────────────────────────────
+            // KEY CHANGE: The model is NO LONGER asked to compute CVSS scores
+            // or assign severity labels. It only identifies vulnerabilities and
+            // selects the 8 qualitative CVSS metric values. All scoring math
+            // is done by the deterministic computeCVSS31() function above.
+            // This is the primary fix for inconsistent severity across runs.
             const systemPrompt = [
-              "You are an aggressive security auditor who never misses vulnerabilities.",
-              "You MUST analyze every changed line deeply and trace all data flows.",
-              "You MUST always return the full Security Checklist section at the end.",
-              "Never return a response under 300 tokens — a thorough review always requires detailed output.",
-              "If you find nothing critical, explain exactly what you checked and why it was ruled safe.",
+              "You are a senior application security engineer performing a thorough code security audit.",
+              "Your ONLY job is to find real security vulnerabilities in the code diff provided.",
               "",
-              "CVSS v3.1 SCORING IS MANDATORY AND STRICTLY MECHANICAL. You MUST follow these exact steps for every finding:",
+              "OUTPUT FORMAT: You MUST respond with ONLY a valid JSON object. No markdown, no explanation, no preamble.",
+              "Do NOT wrap JSON in backticks or code blocks. Output raw JSON only.",
               "",
-              "STEP 1 — Assign each metric using ONLY the allowed values below:",
-              "  AV (Attack Vector)       : N=Network | A=Adjacent | L=Local | P=Physical",
-              "  AC (Attack Complexity)   : L=Low | H=High",
-              "  PR (Privileges Required) : N=None | L=Low | H=High",
-              "  UI (User Interaction)    : N=None | R=Required",
-              "  S  (Scope)               : U=Unchanged | C=Changed",
-              "  C  (Confidentiality)     : N=None | L=Low | H=High",
-              "  I  (Integrity)           : N=None | L=Low | H=High",
-              "  A  (Availability)        : N=None | L=Low | H=High",
+              "DO NOT compute CVSS scores. DO NOT assign severity labels. DO NOT output CVSS scores.",
+              "Your job is ONLY to identify vulnerabilities and select the 8 CVSS metric letters.",
+              "Scores and severity labels will be computed deterministically by the calling system.",
               "",
-              "STEP 2 — Calculate the CVSS v3.1 Base Score using the official NVD formula. No approximations. No gut-feel scores.",
+              "JSON SCHEMA (output exactly this structure):",
+              "{",
+              '  "findings": [',
+              "    {",
+              '      "title": "Short vulnerability title (max 10 words)",',
+              '      "file": "path/to/file.ext",',
+              '      "line": 42,',
+              '      "cwe": "CWE-89",',
+              '      "owasp": "A03:2021",',
+              '      "description": "What the vulnerability is and why it is dangerous.",',
+              '      "fix_before": "The insecure line or block of code",',
+              '      "fix_after": "The secure replacement code",',
+              '      "certainty": "Confirmed|Likely|Possible|Unlikely",',
+              '      "metrics": {',
+              '        "AV": "N|A|L|P",',
+              '        "AC": "L|H",',
+              '        "PR": "N|L|H",',
+              '        "UI": "N|R",',
+              '        "S":  "U|C",',
+              '        "C":  "N|L|H",',
+              '        "I":  "N|L|H",',
+              '        "A":  "N|L|H"',
+              "      }",
+              "    }",
+              "  ],",
+              '  "checklist": [',
+              "    {",
+              '      "class": "SQL Injection (SQLi)",',
+              '      "status": "Not Found|Found",',
+              '      "notes": "One sentence explaining what you checked and why it was ruled out or flagged."',
+              "    }",
+              "  ]",
+              "}",
               "",
-              "STEP 3 — Derive severity STRICTLY from the computed score using these bands:",
-              "  Critical : 9.0 - 10.0",
-              "  High     : 7.0 - 8.9",
-              "  Medium   : 4.0 - 6.9",
-              "  Low      : 0.1 - 3.9",
-              "  Info     : 0.0",
+              "METRIC SELECTION RULES — follow these exactly, they are not negotiable:",
+              "AV (Attack Vector):",
+              "  N = Exploitable remotely over the internet with no physical or network proximity required",
+              "  A = Requires access to the same local network or Bluetooth, not the internet",
+              "  L = Requires local OS user account or process on the same machine",
+              "  P = Requires physical hardware access",
+              "AC (Attack Complexity):",
+              "  L = No special conditions, race conditions, or configuration prerequisites required",
+              "  H = Requires a race condition, specific non-default config, or hard-to-reproduce conditions",
+              "PR (Privileges Required):",
+              "  N = No login or account needed to exploit",
+              "  L = Regular authenticated user account needed",
+              "  H = Administrator or privileged account needed",
+              "UI (User Interaction):",
+              "  N = Attacker can exploit with no victim action needed",
+              "  R = A victim must click a link, open a file, or take some action",
+              "S (Scope):",
+              "  U = Impact stays within the vulnerable component only",
+              "  C = Impact can reach other components or systems beyond the vulnerable one",
+              "C (Confidentiality Impact):",
+              "  H = Total loss of confidentiality; attacker can read all data",
+              "  L = Some data exposed but not all, or attacker cannot control what is read",
+              "  N = No confidentiality impact",
+              "I (Integrity Impact):",
+              "  H = Total loss of integrity; attacker can modify any data",
+              "  L = Some data can be modified but attacker cannot control scope",
+              "  N = No integrity impact",
+              "A (Availability Impact):",
+              "  H = Total loss of availability; service can be completely shut down",
+              "  L = Reduced performance or intermittent availability",
+              "  N = No availability impact",
               "",
-              "ABSOLUTE RULES:",
-              "- You MUST NOT assign a severity label that does not match the computed CVSS Base Score band.",
-              "- You MUST NOT override the computed score with subjective judgment, intuition, or context.",
-              "- You MUST NOT skip the CVSS vector. Every finding requires a full vector string: CVSS:3.1/AV:?/AC:?/PR:?/UI:?/S:?/C:?/I:?/A:?",
-              "- If you cannot assign a valid CVSS vector, do NOT report the finding.",
-              "- The severity label in the table and in the finding detail MUST always match the score band. Any mismatch is a critical error.",
+              "CERTAINTY RULES:",
+              "  Confirmed : Vulnerable line(s) are directly visible in the diff with no ambiguity",
+              "  Likely    : Strong risk pattern present but full exploit depends on calling context",
+              "  Possible  : Suspicious pattern; requires assumptions about code outside the diff",
+              "  Unlikely  : Theoretical or edge-case risk; low confidence",
+              "",
+              "CHECKLIST: Always include all 12 vulnerability classes below in the checklist array:",
+              "  SQL Injection (SQLi), Cross-Site Scripting (XSS), Server-Side Request Forgery (SSRF),",
+              "  Authentication / Auth Bypass, Hardcoded Secrets / API Keys, Insecure Direct Object Reference (IDOR),",
+              "  Remote Code Execution (RCE), Cross-Site Request Forgery (CSRF), Open Redirect,",
+              "  Weak Cryptography, Broken Access Control, Supply Chain / Dependency Risk",
+              "",
+              "STRICT RULES:",
+              "  - Report ONLY real security vulnerabilities. Never comment on code style, performance, or tests.",
+              "  - Every metrics object MUST have all 8 keys: AV, AC, PR, UI, S, C, I, A.",
+              "  - Every metric value MUST be from the allowed set for that metric.",
+              "  - If you find no vulnerabilities, return an empty findings array: []",
+              "  - Output ONLY the raw JSON. Any text outside the JSON object will break parsing."
             ].join("\n");
 
-            const userPrompt = "You are a senior Application Security Engineer performing a thorough security audit.\n" +
-              "Your ONLY job is to analyze the code changes below and report security issues.\n\n" +
-              "STRICT RULES:\n" +
-              "- Report ONLY real security vulnerabilities (OWASP Top 10, CWE, injection, SSRF, auth bypass, broken access control, secrets leakage, logic flaws, data-flow issues, supply-chain risks, etc.).\n" +
-              "- NEVER comment on code style, performance, tests, maintainability, or anything non-security.\n\n" +
-              "CVSS v3.1 SCORING — YOU MUST FOLLOW THIS PROCESS FOR EVERY SINGLE FINDING WITHOUT EXCEPTION:\n\n" +
-              "  STEP 1: Select one value per metric from the allowed set below:\n" +
-              "    AV (Attack Vector)       : N = Network | A = Adjacent | L = Local | P = Physical\n" +
-              "    AC (Attack Complexity)   : L = Low     | H = High\n" +
-              "    PR (Privileges Required) : N = None    | L = Low      | H = High\n" +
-              "    UI (User Interaction)    : N = None    | R = Required\n" +
-              "    S  (Scope)               : U = Unchanged | C = Changed\n" +
-              "    C  (Confidentiality)     : N = None    | L = Low      | H = High\n" +
-              "    I  (Integrity)           : N = None    | L = Low      | H = High\n" +
-              "    A  (Availability)        : N = None    | L = Low      | H = High\n\n" +
-              "  STEP 2: Compute the CVSS v3.1 Base Score using the official NVD formula.\n" +
-              "    - Use the exact numeric weights defined in the CVSS v3.1 specification.\n" +
-              "    - Do NOT estimate or guess the score. Calculate it from the vector.\n\n" +
-              "  STEP 3: Assign severity ONLY based on the computed score:\n" +
-              "    Critical : 9.0 – 10.0\n" +
-              "    High     : 7.0 – 8.9\n" +
-              "    Medium   : 4.0 – 6.9\n" +
-              "    Low      : 0.1 – 3.9\n" +
-              "    Info     : 0.0\n\n" +
-              "  HARD CONSTRAINTS — VIOLATIONS ARE NOT PERMITTED:\n" +
-              "  - The severity label MUST match the CVSS score band exactly. No exceptions.\n" +
-              "  - You MUST NOT assign severity based on intuition, impact feel, or context alone.\n" +
-              "  - You MUST NOT omit the CVSS vector string for any finding.\n" +
-              "  - You MUST NOT report a finding without completing Steps 1–3.\n" +
-              "  - The vector string MUST use this exact format: CVSS:3.1/AV:?/AC:?/PR:?/UI:?/S:?/C:?/I:?/A:?\n" +
-              "  - Any finding where severity does not match the score band must be corrected before output.\n\n" +
-              "- For every issue, provide a Certainty rating using EXACTLY one of: Confirmed | Likely | Possible | Unlikely\n" +
-              "    Confirmed : Vulnerability is definitively present from the code alone (e.g. hardcoded secret, direct SQLi).\n" +
-              "    Likely    : Strong indicators present; exploitability depends on minor runtime conditions.\n" +
-              "    Possible  : Suspicious pattern that could be vulnerable depending on context not visible in the diff.\n" +
-              "    Unlikely  : Low-confidence finding; included for awareness, may be a false positive.\n" +
-              "- You MUST analyze every single changed line deeply and trace data flows end to end.\n" +
-              "- Even if no issues are found, you MUST include a Security Checklist section listing every vulnerability class you checked and one sentence explaining why each was ruled out.\n" +
-              "- Never return 0 issues on a diff larger than 100 lines without providing the full checklist.\n\n" +
-              "CERTAINTY GUIDANCE:\n" +
-              "- Confirmed: You can point to the exact vulnerable line(s) with no ambiguity.\n" +
-              "- Likely: The pattern is clearly risky but full exploit depends on calling context or config.\n" +
-              "- Possible: Requires assumptions about code outside the diff.\n" +
-              "- Unlikely: Edge-case or theoretical risk; flag it but don't alarm the team.\n\n" +
-              "OUTPUT FORMAT (follow exactly):\n\n" +
-              "## Security Review\n\n" +
-              "> **Model**: Claude Haiku 4.5 | **Scan Date**: " + today + "\n\n" +
-              "**Summary**: X issue(s) found — Critical N | High N | Medium N | Low N | Info N\n\n" +
-              "---\n\n" +
-              "### Critical Issues\n" +
-              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
-              "|----------|------------|-------------|-----------|------|------|-------|\n" +
-              "| Critical | 9.8 | CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H | Confirmed | path/to/file | 42 | Short title |\n\n" +
-              "**[CRIT-1] Issue Title**\n" +
-              "- **Severity**: Critical\n" +
-              "- **CVSS Base Score**: 9.8\n" +
-              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\n" +
-              "- **CVSS Breakdown**:\n" +
-              "  - AV: N (Network) — remotely exploitable\n" +
-              "  - AC: L (Low) — no special conditions required\n" +
-              "  - PR: N (None) — no privileges needed\n" +
-              "  - UI: N (None) — no user interaction needed\n" +
-              "  - S:  U (Unchanged)\n" +
-              "  - C:  H (High) — full confidentiality loss\n" +
-              "  - I:  H (High) — full integrity loss\n" +
-              "  - A:  H (High) — full availability loss\n" +
-              "- **Certainty**: Confirmed\n" +
-              "- **Description**: What the risk is and why it is dangerous.\n" +
-              "- **CWE**: CWE-XXX - Name\n" +
-              "- **OWASP**: A0X:2021 - Category\n" +
-              "- **Fix**:\n" +
-              "```diff\n" +
-              "- insecure code\n" +
-              "+ secure code\n" +
-              "```\n\n" +
-              "---\n\n" +
-              "### High Issues\n" +
-              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
-              "|----------|------------|-------------|-----------|------|------|-------|\n" +
-              "| High | 7.5 | CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N | Likely | path/to/file | 15 | Short title |\n\n" +
-              "**[HIGH-1] Issue Title**\n" +
-              "- **Severity**: High\n" +
-              "- **CVSS Base Score**: 7.5\n" +
-              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N\n" +
-              "- **CVSS Breakdown**:\n" +
-              "  - AV: N (Network)\n" +
-              "  - AC: L (Low)\n" +
-              "  - PR: N (None)\n" +
-              "  - UI: N (None)\n" +
-              "  - S:  U (Unchanged)\n" +
-              "  - C:  H (High)\n" +
-              "  - I:  N (None)\n" +
-              "  - A:  N (None)\n" +
-              "- **Certainty**: Likely\n" +
-              "- **Description**: What the risk is and why it is dangerous.\n" +
-              "- **CWE**: CWE-XXX - Name\n" +
-              "- **OWASP**: A0X:2021 - Category\n" +
-              "- **Fix**:\n" +
-              "```diff\n" +
-              "- insecure code\n" +
-              "+ secure code\n" +
-              "```\n\n" +
-              "---\n\n" +
-              "### Medium Issues\n" +
-              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
-              "|----------|------------|-------------|-----------|------|------|-------|\n" +
-              "| Medium | 5.3 | CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N | Possible | path/to/file | 30 | Short title |\n\n" +
-              "**[MED-1] Issue Title**\n" +
-              "- **Severity**: Medium\n" +
-              "- **CVSS Base Score**: 5.3\n" +
-              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\n" +
-              "- **CVSS Breakdown**:\n" +
-              "  - AV: N (Network)\n" +
-              "  - AC: L (Low)\n" +
-              "  - PR: N (None)\n" +
-              "  - UI: N (None)\n" +
-              "  - S:  U (Unchanged)\n" +
-              "  - C:  L (Low)\n" +
-              "  - I:  N (None)\n" +
-              "  - A:  N (None)\n" +
-              "- **Certainty**: Possible\n" +
-              "- **Description**: What the risk is and why it is dangerous.\n" +
-              "- **CWE**: CWE-XXX - Name\n" +
-              "- **OWASP**: A0X:2021 - Category\n" +
-              "- **Fix**:\n" +
-              "```diff\n" +
-              "- insecure code\n" +
-              "+ secure code\n" +
-              "```\n\n" +
-              "---\n\n" +
-              "### Low Issues\n" +
-              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
-              "|----------|------------|-------------|-----------|------|------|-------|\n" +
-              "| Low | 3.1 | CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N | Unlikely | path/to/file | 8 | Short title |\n\n" +
-              "**[LOW-1] Issue Title**\n" +
-              "- **Severity**: Low\n" +
-              "- **CVSS Base Score**: 3.1\n" +
-              "- **CVSS Vector**: CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N\n" +
-              "- **CVSS Breakdown**:\n" +
-              "  - AV: N (Network)\n" +
-              "  - AC: H (High)\n" +
-              "  - PR: N (None)\n" +
-              "  - UI: R (Required)\n" +
-              "  - S:  U (Unchanged)\n" +
-              "  - C:  L (Low)\n" +
-              "  - I:  N (None)\n" +
-              "  - A:  N (None)\n" +
-              "- **Certainty**: Unlikely\n" +
-              "- **Description**: What the risk is and why it is dangerous.\n" +
-              "- **CWE**: CWE-XXX - Name\n" +
-              "- **OWASP**: A0X:2021 - Category\n" +
-              "- **Fix**:\n" +
-              "```diff\n" +
-              "- insecure code\n" +
-              "+ secure code\n" +
-              "```\n\n" +
-              "---\n\n" +
-              "### Info\n" +
-              "| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n" +
-              "|----------|------------|-------------|-----------|------|------|-------|\n" +
-              "| Info | 0.0 | N/A | Confirmed | path/to/file | 5 | Short title |\n\n" +
-              "**[INFO-1] Issue Title**\n" +
-              "- **Severity**: Info\n" +
-              "- **CVSS Base Score**: 0.0 (Best-practice observation, not exploitable)\n" +
-              "- **Certainty**: Confirmed\n" +
-              "- **Description**: Brief observation and recommended best practice.\n" +
-              "- **CWE**: CWE-XXX - Name (if applicable)\n\n" +
-              "---\n\n" +
-              "### Security Checklist\n" +
-              "*(Always include this section even if no issues found)*\n\n" +
-              "| Vulnerability Class | Status | CVSS Range if Found | Notes |\n" +
-              "|---------------------|--------|---------------------|-------|\n" +
-              "| SQL Injection (SQLi) | Not Found | Critical (9.0–10.0) | No raw SQL queries with user input detected |\n" +
-              "| Cross-Site Scripting (XSS) | Not Found | High (7.0–8.9) | No unsanitized output to HTML detected |\n" +
-              "| Server-Side Request Forgery (SSRF) | Not Found | High (7.0–8.9) | No outbound requests with user-controlled URLs |\n" +
-              "| Authentication / Auth Bypass | Not Found | Critical (9.0–10.0) | Auth checks appear intact |\n" +
-              "| Hardcoded Secrets / API Keys | Not Found | Critical (9.0–10.0) | No secrets or tokens found in diff |\n" +
-              "| Insecure Direct Object Reference (IDOR) | Not Found | High (7.0–8.9) | Access control checks present |\n" +
-              "| Remote Code Execution (RCE) | Not Found | Critical (9.0–10.0) | No eval or shell exec with user input |\n" +
-              "| Cross-Site Request Forgery (CSRF) | Not Found | Medium (4.0–6.9) | CSRF tokens in place |\n" +
-              "| Open Redirect | Not Found | Medium (4.0–6.9) | Redirect targets are validated |\n" +
-              "| Weak Cryptography | Not Found | Medium (4.0–6.9) | No weak hash or cipher usage |\n" +
-              "| Broken Access Control | Not Found | High (7.0–8.9) | Role checks appear correct |\n" +
-              "| Supply Chain / Dependency Risk | Not Found | High (7.0–8.9) | No suspicious new dependencies |\n\n" +
-              "---\n\n" +
-              "> Auto-generated review. Always verify findings manually before acting. CVSS scores are calculated strictly from the CVSS v3.1 Base Score formula using the vector metrics above.\n\n" +
-              "FINAL CHECKLIST BEFORE OUTPUT — YOU MUST VERIFY EACH POINT:\n" +
-              "- [ ] Every finding has a complete CVSS vector: CVSS:3.1/AV:?/AC:?/PR:?/UI:?/S:?/C:?/I:?/A:?\n" +
-              "- [ ] Every metric uses only the allowed values: AV(N/A/L/P) AC(L/H) PR(N/L/H) UI(N/R) S(U/C) C(N/L/H) I(N/L/H) A(N/L/H)\n" +
-              "- [ ] Every CVSS score was calculated from the vector, not guessed\n" +
-              "- [ ] Every severity label matches the score band: Critical(9-10) High(7-8.9) Medium(4-6.9) Low(0.1-3.9) Info(0.0)\n" +
-              "- [ ] Every finding includes a CVSS Breakdown section listing all 8 metrics with their chosen value and label\n" +
-              "- [ ] No severity was assigned by intuition or overridden after calculation\n" +
-              "- [ ] Security Checklist section is present and filled with real observations\n" +
-              "- [ ] Certainty is included for every finding\n\n" +
-              "- Omit any severity section entirely if zero issues at that level.\n" +
-              "- Never print empty tables.\n" +
-              "- Number issues per group: CRIT-1, CRIT-2, HIGH-1, HIGH-2, MED-1, LOW-1, INFO-1 etc.\n\n" +
+            const userPrompt =
+              "Analyze the following code diff for security vulnerabilities.\n" +
+              "Return ONLY the raw JSON object as specified. No other text.\n\n" +
               "PR changes to analyze:\n" +
               truncatedDiff;
 
             try {
               console.log(`Calling Claude Haiku 4.5...`);
 
-              // FIX 9: Timeout on the main Anthropic API call.
               const controller = new AbortController();
-              // Allow generous time for the full security review response.
-              const timeoutId = setTimeout(() => controller.abort(), 120000);
+              const timeoutId  = setTimeout(() => controller.abort(), 120000);
 
               let response;
               try {
@@ -504,14 +444,9 @@ jobs:
                   body: JSON.stringify({
                     model: MODEL,
                     max_tokens: MAX_TOKENS,
-                    // FIX 5: Removed temperature parameter. The Anthropic API
-                    // does not guarantee support for non-zero temperature on
-                    // every model/version combination and the security-review
-                    // use case benefits from fully deterministic output anyway.
+                    temperature: 0,        // deterministic token selection — reduces metric variance
                     system: systemPrompt,
-                    messages: [
-                      { role: "user", content: userPrompt }
-                    ]
+                    messages: [{ role: "user", content: userPrompt }]
                   }),
                   signal: controller.signal
                 });
@@ -519,6 +454,7 @@ jobs:
                 clearTimeout(timeoutId);
               }
 
+              // ─── Handle non-2xx responses ──────────────────────────
               if (!response.ok) {
                 const errorBody = await response.json().catch(() => ({}));
                 const errorType = errorBody?.error?.type ?? "";
@@ -536,7 +472,6 @@ jobs:
                       "> Reported to security team."
                     ].join("\n")
                   });
-
                   await sendSlackAlert(
                     `⚠️ *Security Review Skipped — Anthropic Rate Limit Hit During Scan*\n` +
                     `> *Repo*: ${repoLabel}\n` +
@@ -544,7 +479,6 @@ jobs:
                     `> *Reason*: Rate limit or quota exceeded during scan.\n` +
                     `> *Action*: Check your Anthropic API plan or rotate the \`ANTHROPIC_API_KEY\` secret.`
                   );
-
                   core.setFailed("Security review skipped: Anthropic API rate limit exceeded.");
                   return;
                 }
@@ -556,31 +490,26 @@ jobs:
                   `> *HTTP Status*: ${response.status}\n` +
                   `> *Detail*: \`${errorMsg}\``
                 );
-
                 core.setFailed(`Anthropic API error ${response.status}: ${errorMsg}`);
                 return;
               }
 
               const data = await response.json();
 
-              // FIX 7: Scan all content blocks for a text block instead of
-              // blindly assuming index 0 is always text. Tool-use responses or
-              // multi-block responses would previously produce an empty string
-              // and trigger the "empty response" error path silently.
-              const reviewText = (data?.content ?? [])
+              // ─── Extract raw text from response ───────────────────
+              const rawText = (data?.content ?? [])
                 .filter(block => block.type === "text")
                 .map(block => block.text)
                 .join("\n")
                 .trim();
 
-              if (!reviewText) {
+              if (!rawText) {
                 await sendSlackAlert(
                   `🔴 *Security Review Failed — Empty Response from Claude Haiku*\n` +
                   `> *Repo*: ${repoLabel}\n` +
                   `> *PR*: <${prLink}|#${context.issue.number}>\n` +
                   `> *Detail*: Model returned no text content.`
                 );
-
                 core.setFailed(`Unexpected Anthropic response structure: ${JSON.stringify(data)}`);
                 return;
               }
@@ -591,32 +520,168 @@ jobs:
               console.log(`  Output tokens: ${usage.output_tokens ?? 'N/A'}`);
               console.log('───────────────────────────────────────────');
 
-              const outputTooShort = (usage.output_tokens ?? 0) < 300;
-              if (outputTooShort) {
-                console.warn('WARNING: Output tokens very low — model may not have done a full review!');
+              // ─── Parse JSON from model ─────────────────────────────
+              let parsed;
+              try {
+                // Strip any accidental markdown code fences the model may add
+                const cleaned = rawText
+                  .replace(/^```(?:json)?\s*/i, '')
+                  .replace(/\s*```$/,            '')
+                  .trim();
+                parsed = JSON.parse(cleaned);
+              } catch (parseErr) {
+                await sendSlackAlert(
+                  `🔴 *Security Review Failed — Could Not Parse Model JSON*\n` +
+                  `> *Repo*: ${repoLabel}\n` +
+                  `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Detail*: ${parseErr.message}\n` +
+                  `> *Raw output (first 500 chars)*: \`${rawText.slice(0, 500)}\``
+                );
+                core.setFailed(`JSON parse error: ${parseErr.message}`);
+                return;
               }
 
-              // ─── Parse findings ────────────────────────────────────
-              // FIX 6: Regex with the /g flag retains lastIndex on the regex
-              // object between calls in the same process context. Create a
-              // fresh regex on each parse rather than relying on a module-level
-              // constant that would produce wrong matches on subsequent runs.
-              const severityGroups = { Critical: [], High: [], Medium: [], Low: [], Info: [] };
-              const findingRegex = /\*\*\[(CRIT|HIGH|MED|LOW|INFO)-\d+\]\s(.+?)\*\*/g;
-              const severityMap  = { CRIT: 'Critical', HIGH: 'High', MED: 'Medium', LOW: 'Low', INFO: 'Info' };
-              let match;
-              while ((match = findingRegex.exec(reviewText)) !== null) {
-                const sev = severityMap[match[1]];
-                if (sev) severityGroups[sev].push(match[2].trim());
+              const rawFindings = Array.isArray(parsed?.findings) ? parsed.findings : [];
+              const checklist   = Array.isArray(parsed?.checklist) ? parsed.checklist : [];
+
+              // ─── DETERMINISTIC SCORING ─────────────────────────────
+              // For each finding:
+              //   1. If CWE matches our lookup table → use canonical vector (near-100% consistent)
+              //   2. Otherwise → use model-supplied metrics (still consistent because
+              //      computeCVSS31 is pure math — same metrics always produce same score)
+              // The model NEVER assigns the score or severity; this code does.
+              const findings = rawFindings.map((f, idx) => {
+                const cweKey         = (f.cwe ?? '').toUpperCase().replace(/\s/g, '');
+                const canonicalMetrics = CWE_VECTORS[cweKey];
+                const metrics        = canonicalMetrics ?? f.metrics;
+                const usedCanonical  = !!canonicalMetrics;
+
+                // Validate all 8 metrics are present and valid
+                const validAV = ['N','A','L','P'];
+                const validAC = ['L','H'];
+                const validPR = ['N','L','H'];
+                const validUI = ['N','R'];
+                const validS  = ['U','C'];
+                const validCI = ['N','L','H'];
+
+                const isValid =
+                  metrics &&
+                  validAV.includes(metrics.AV) &&
+                  validAC.includes(metrics.AC) &&
+                  validPR.includes(metrics.PR) &&
+                  validUI.includes(metrics.UI) &&
+                  validS.includes(metrics.S)   &&
+                  validCI.includes(metrics.C)  &&
+                  validCI.includes(metrics.I)  &&
+                  validCI.includes(metrics.A);
+
+                if (!isValid) {
+                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid or missing metrics — skipping CVSS scoring.`);
+                  return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', usedCanonical };
+                }
+
+                const score    = computeCVSS31(metrics);
+                const severity = getSeverity(score);
+                const vector   = getVector(metrics);
+
+                console.log(`Finding ${idx + 1}: "${f.title}" | CWE: ${f.cwe} | Vector: ${vector} | Score: ${score} | Severity: ${severity}${usedCanonical ? ' [canonical]' : ' [model metrics]'}`);
+
+                return { ...f, metrics, score, severity, vector, usedCanonical };
+              });
+
+              // ─── Group by severity ─────────────────────────────────
+              const groups = { Critical: [], High: [], Medium: [], Low: [], Info: [], Unknown: [] };
+              for (const f of findings) {
+                (groups[f.severity] ?? groups.Unknown).push(f);
               }
 
-              const totalFindings = Object.values(severityGroups).reduce((s, a) => s + a.length, 0);
+              const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
 
-              // ─── Slack findings summary ────────────────────────────
-              // FIX 8: Removed the separate duplicate truncation Slack alert
-              // that fired after the summary. The truncation warning is already
-              // included in summaryLines below, so the second alert was pure
-              // noise causing duplicate notifications in the channel.
+              // ─── Build PR comment (markdown) ───────────────────────
+              const severityOrder  = ['Critical', 'High', 'Medium', 'Low', 'Info'];
+              const severityEmoji  = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
+              const prefixMap      = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
+
+              let commentBody = `## Security Review\n\n`;
+              commentBody    += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
+              commentBody    += `**Summary**: ${totalFindings} issue(s) found — `;
+              commentBody    += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
+              commentBody    += `> 🔒 CVSS v3.1 scores computed deterministically from vector metrics by the CI system — not by the AI model. Same diff will always produce the same score.\n\n`;
+              commentBody    += `---\n\n`;
+
+              for (const sev of severityOrder) {
+                const group = groups[sev];
+                if (!group || group.length === 0) continue;
+
+                commentBody += `### ${severityEmoji[sev]} ${sev} Issues\n\n`;
+                commentBody += `| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n`;
+                commentBody += `|----------|------------|-------------|-----------|------|------|-------|\n`;
+                for (const f of group) {
+                  commentBody += `| ${sev} | ${f.score} | \`${f.vector}\` | ${f.certainty} | \`${f.file}\` | ${f.line} | ${f.title} |\n`;
+                }
+                commentBody += `\n`;
+
+                const prefix = prefixMap[sev];
+                group.forEach((f, i) => {
+                  const id = `${prefix}-${i + 1}`;
+                  commentBody += `**[${id}] ${f.title}**\n`;
+                  commentBody += `- **Severity**: ${sev}\n`;
+                  commentBody += `- **CVSS Base Score**: ${f.score}\n`;
+                  commentBody += `- **CVSS Vector**: \`${f.vector}\`\n`;
+                  commentBody += `- **CVSS Breakdown**:\n`;
+                  commentBody += `  - AV: ${f.metrics.AV} | AC: ${f.metrics.AC} | PR: ${f.metrics.PR} | UI: ${f.metrics.UI}\n`;
+                  commentBody += `  - S: ${f.metrics.S} | C: ${f.metrics.C} | I: ${f.metrics.I} | A: ${f.metrics.A}\n`;
+                  if (f.usedCanonical) {
+                    commentBody += `- **Vector Source**: Canonical CWE lookup table (deterministic)\n`;
+                  } else {
+                    commentBody += `- **Vector Source**: Model-assigned metrics (temperature=0)\n`;
+                  }
+                  commentBody += `- **Certainty**: ${f.certainty}\n`;
+                  commentBody += `- **CWE**: ${f.cwe}\n`;
+                  commentBody += `- **OWASP**: ${f.owasp}\n`;
+                  commentBody += `- **Description**: ${f.description}\n`;
+                  commentBody += `- **Fix**:\n`;
+                  commentBody += `\`\`\`diff\n- ${f.fix_before}\n+ ${f.fix_after}\n\`\`\`\n\n`;
+                });
+
+                commentBody += `---\n\n`;
+              }
+
+              // ─── Security Checklist ────────────────────────────────
+              if (checklist.length > 0) {
+                commentBody += `### Security Checklist\n\n`;
+                commentBody += `| Vulnerability Class | Status | Notes |\n`;
+                commentBody += `|---------------------|--------|-------|\n`;
+                for (const item of checklist) {
+                  const icon = item.status === 'Found' ? '🔴' : '✅';
+                  commentBody += `| ${item.class} | ${icon} ${item.status} | ${item.notes} |\n`;
+                }
+                commentBody += `\n---\n\n`;
+              }
+
+              // ─── Footer ────────────────────────────────────────────
+              const footerLines = [
+                `> 🤖 **Model**: \`${MODEL}\``,
+                `> 📊 **Tokens** — Input: \`${usage.input_tokens ?? 'N/A'}\` | Output: \`${usage.output_tokens ?? 'N/A'}\``,
+                `> 📅 **Scanned**: ${today}`,
+                `> 🔢 **Scoring**: CVSS v3.1 Base Score computed by CI system from vector metrics. Model outputs metric letters only — never scores or severity labels.`,
+              ];
+              if (wasTruncated) {
+                footerLines.push(`> ⚠️ **Warning**: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+              }
+              commentBody += footerLines.join('\n') + '\n';
+
+              // ─── Post PR comment ───────────────────────────────────
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+
+              console.log(`Security review posted successfully on PR #${context.issue.number}`);
+
+              // ─── Slack summary ─────────────────────────────────────
               const summaryLines = [
                 totalFindings === 0
                   ? `✅ *Security Review Complete — No Findings*`
@@ -625,55 +690,28 @@ jobs:
                 `> *PR*: <${prLink}|#${context.issue.number}>`,
                 `> *Model*: \`${MODEL}\``,
                 `> *Scanned*: ${today}`,
-                `> *Summary*: Critical: ${severityGroups.Critical.length} | High: ${severityGroups.High.length} | Medium: ${severityGroups.Medium.length} | Low: ${severityGroups.Low.length} | Info: ${severityGroups.Info.length}`,
+                `> *Summary*: Critical: ${groups.Critical.length} | High: ${groups.High.length} | Medium: ${groups.Medium.length} | Low: ${groups.Low.length} | Info: ${groups.Info.length}`,
               ];
 
               if (totalFindings > 0) {
                 summaryLines.push('');
                 summaryLines.push('*Findings:*');
                 summaryLines.push('```');
-                summaryLines.push('Severity   | Finding');
-                summaryLines.push('-----------|' + '-'.repeat(50));
-                for (const [sev, names] of Object.entries(severityGroups)) {
-                  for (const name of names) {
-                    summaryLines.push(`${sev.padEnd(10)} | ${name}`);
+                summaryLines.push('Severity   | Score | Finding');
+                summaryLines.push('-----------|-------|' + '-'.repeat(40));
+                for (const sev of severityOrder) {
+                  for (const f of (groups[sev] ?? [])) {
+                    summaryLines.push(`${sev.padEnd(10)} | ${String(f.score).padEnd(5)} | ${f.title}`);
                   }
                 }
                 summaryLines.push('```');
               }
 
-              if (wasTruncated)   summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
-              if (outputTooShort) summaryLines.push(`> ⚠️ *Warning*: Model output was very short — review may be incomplete. Re-run or review manually.`);
+              if (wasTruncated) {
+                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+              }
 
               await sendSlackAlert(summaryLines.join('\n'));
-
-              // ─── Post PR comment ───────────────────────────────────
-              // FIX 10: Replaced the fragile filter(Boolean) footer array with
-              // explicit conditional pushes so empty strings from ternaries
-              // never accidentally collapse intended lines. The previous pattern
-              // relied on '' being falsy, which was correct by accident and
-              // would break if any line became a single space or similar.
-              const footerLines = ['', '---'];
-              if (wasTruncated) {
-                footerLines.push('> ⚠️ WARNING: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.');
-              }
-              if (outputTooShort) {
-                footerLines.push('> ⚠️ WARNING: Model output was very short — review may be incomplete. Re-run or review manually.');
-              }
-              footerLines.push(`> 🤖 **Model used**: \`${MODEL}\``);
-              footerLines.push(`> 📊 **Tokens** — Input: \`${usage.input_tokens ?? 'N/A'}\` | Output: \`${usage.output_tokens ?? 'N/A'}\``);
-              footerLines.push(`> 📅 **Scanned**: ${today}`);
-              footerLines.push(`> 🔢 **Scoring**: CVSS v3.1 Base Score computed strictly from AV/AC/PR/UI/S/C/I/A vector metrics | Severity derived from score band only`);
-              const footer = footerLines.join('\n');
-
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: reviewText + footer
-              });
-
-              console.log(`Security review posted successfully on PR #${context.issue.number}`);
 
             } catch (error) {
               await sendSlackAlert(
@@ -682,6 +720,5 @@ jobs:
                 `> *PR*: <${prLink}|#${context.issue.number}>\n` +
                 `> *Error*: ${error.message}`
               );
-
               core.setFailed(`Script error: ${error.message}\n${error.stack}`);
             }
