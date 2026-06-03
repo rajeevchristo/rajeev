@@ -359,13 +359,6 @@ jobs:
               "      }",
               "    }",
               "  ],",
-              '  "checklist": [',
-              "    {",
-              '      "class": "SQL Injection (SQLi)",',
-              '      "status": "Not Found|Found",',
-              '      "notes": "One sentence explaining what you checked and why it was ruled out or flagged."',
-              "    }",
-              "  ]",
               "}",
               "",
               "METRIC SELECTION RULES — follow these exactly, they are not negotiable:",
@@ -406,12 +399,7 @@ jobs:
               "  Possible  : Suspicious pattern; requires assumptions about code outside the diff",
               "  Unlikely  : Theoretical or edge-case risk; low confidence",
               "",
-              "CHECKLIST: Always include all 12 vulnerability classes below in the checklist array:",
-              "  SQL Injection (SQLi), Cross-Site Scripting (XSS), Server-Side Request Forgery (SSRF),",
-              "  Authentication / Auth Bypass, Hardcoded Secrets / API Keys, Insecure Direct Object Reference (IDOR),",
-              "  Remote Code Execution (RCE), Cross-Site Request Forgery (CSRF), Open Redirect,",
-              "  Weak Cryptography, Broken Access Control, Supply Chain / Dependency Risk",
-              "",
+
               "STRICT RULES:",
               "  - Report ONLY real security vulnerabilities. Never comment on code style, performance, or tests.",
               "  - Every metrics object MUST have all 8 keys: AV, AC, PR, UI, S, C, I, A.",
@@ -542,7 +530,6 @@ jobs:
               }
 
               const rawFindings = Array.isArray(parsed?.findings) ? parsed.findings : [];
-              const checklist   = Array.isArray(parsed?.checklist) ? parsed.checklist : [];
 
               // ─── DETERMINISTIC SCORING ─────────────────────────────
               // For each finding:
@@ -645,18 +632,6 @@ jobs:
                 });
 
                 commentBody += `---\n\n`;
-              }
-
-              // ─── Security Checklist ────────────────────────────────
-              if (checklist.length > 0) {
-                commentBody += `### Security Checklist\n\n`;
-                commentBody += `| Vulnerability Class | Status | Notes |\n`;
-                commentBody += `|---------------------|--------|-------|\n`;
-                for (const item of checklist) {
-                  const icon = item.status === 'Found' ? '🔴' : '✅';
-                  commentBody += `| ${item.class} | ${icon} ${item.status} | ${item.notes} |\n`;
-                }
-                commentBody += `\n---\n\n`;
               }
 
               // ─── Footer ────────────────────────────────────────────
