@@ -662,13 +662,11 @@ jobs:
             ].join("\n");
 
             const userPrompt =
-              "Work through the security checklist step by step.\n" +
-              "Complete EVERY step before outputting JSON.\n" +
-              "For Step 1 explicitly identify all user input sources.\n" +
-              "For Step 2 explicitly trace each input to its sink.\n" +
-              "For Steps 3-7 check every item against every ADDED line.\n" +
-              "Only after completing all steps output the JSON findings.\n\n" +
-              "Scan date: " + today + "\n\n" +
+              "Analyze the diff below for security vulnerabilities.\n" +
+              "Follow the checklist in the system prompt internally.\n" +
+              "Do NOT write any explanation, thinking, or text before the JSON.\n" +
+              "Your entire response must be a single raw JSON object starting with { and ending with }.\n" +
+              "First character of your response must be { and nothing else.\n\n" +
               "Diff to analyze:\n" +
               truncatedDiff;
 
@@ -767,14 +765,40 @@ jobs:
               console.log('───────────────────────────────────────────');
 
               // ─── Parse JSON from model ─────────────────────────────
+              // Robust extraction: the model sometimes prefixes the JSON
+              // with thinking text like "I'll work through..." despite
+              // being told not to. We extract the first { ... } block
+              // from the response rather than assuming the whole text
+              // is JSON. This makes parsing resilient to any preamble
+              // or postamble the model adds.
               let parsed;
               try {
-                // Strip any accidental markdown code fences the model may add
-                const cleaned = rawText
+                // Step 1: strip markdown code fences if present
+                let cleaned = rawText
                   .replace(/^```(?:json)?\s*/i, '')
-                  .replace(/\s*```$/,            '')
+                  .replace(/\s*```$/, '')
                   .trim();
-                parsed = JSON.parse(cleaned);
+
+                // Step 2: if the response starts with non-JSON text,
+                // find the first { and last } and extract just that block.
+                // This handles "I'll work through... { findings: [] }"
+                const firstBrace = cleaned.indexOf('{');
+                const lastBrace  = cleaned.lastIndexOf('}');
+
+                if (firstBrace === -1 || lastBrace === -1) {
+                  throw new Error("No JSON object found in model response");
+                }
+
+                if (firstBrace > 0) {
+                  console.warn(
+                    "WARNING: Model output contained " + firstBrace +
+                    " chars of text before JSON. Extracted JSON block only."
+                  );
+                }
+
+                cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+                parsed  = JSON.parse(cleaned);
+
               } catch (parseErr) {
                 await sendSlackAlert(
                   `🔴 *Security Review Failed — Could Not Parse Model JSON*\n` +
