@@ -159,11 +159,15 @@ jobs:
             const fs = require('fs');
 
             // ─── CONFIG ────────────────────────────────────────────────
-            const MAX_DIFF_CHARS = 120000;
-            const MAX_TOKENS     = 8000;
-            const MODEL          = "claude-haiku-4-5";
-            const NUM_RUNS       = 3;
-            const TEMPERATURE    = 0; // All runs use temperature 0 — maximum determinism
+            const MAX_DIFF_CHARS  = 120000;
+            const MAX_TOKENS      = 8000;
+            const MODEL           = "claude-haiku-4-5";
+            const NUM_RUNS        = 3;
+            const TEMPERATURE     = 0;
+            // A finding must appear in at least MIN_RUNS_REQUIRED out of
+            // NUM_RUNS to be reported. Set to 2 so one failed or divergent
+            // run does not suppress a real vulnerability.
+            const MIN_RUNS_REQUIRED = 2;
             // ───────────────────────────────────────────────────────────
 
             // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
@@ -295,6 +299,7 @@ jobs:
             console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
             console.log(`Output tokens (max):     ${MAX_TOKENS}`);
             console.log(`Temperature    : ${TEMPERATURE} (all runs)`);
+            console.log(`Min runs required: ${MIN_RUNS_REQUIRED}/${NUM_RUNS}`);
             if (wasTruncated) console.log('WARNING: Diff was truncated — some changes were NOT reviewed!');
 
             const today = new Date().toISOString().split('T')[0];
@@ -634,14 +639,6 @@ jobs:
             try {
 
               // ─── HELPER: single Claude API call ───────────────────
-              // All runs use TEMPERATURE = 0 for maximum determinism.
-              // At temperature 0 the model always picks the highest-
-              // probability token — output is as stable as possible.
-              // Three identical runs are still valuable because:
-              //   1. The intersection filter removes any run that fails
-              //      to parse or returns an empty response
-              //   2. Confirms findings are stable, not sampling artifacts
-              //   3. Protects against transient API or network glitches
               const callClaude = async (runIndex) => {
                 console.log(`Run ${runIndex + 1}/${NUM_RUNS} — calling Claude Haiku 4.5 (temperature: ${TEMPERATURE})...`);
 
@@ -716,15 +713,30 @@ jobs:
                 }
               };
 
-              // ─── INTERSECTION DEDUPLICATION ────────────────────────
-              // Only report findings that appear consistently across ALL
-              // NUM_RUNS runs. A finding must be seen in every run to be
-              // reported — this eliminates any single-run anomalies.
-              // Since all runs are temperature 0, a finding present in
-              // all 3 runs is essentially certain — the model produced
-              // the exact same output independently three times.
-              const deduplicateFindings = (allFindings, requiredRuns = NUM_RUNS) => {
+              // ─── QUORUM DEDUPLICATION ──────────────────────────────
+              // A finding is reported if it appears in at least
+              // MIN_RUNS_REQUIRED out of NUM_RUNS runs (2 out of 3).
+              //
+              // WHY 2/3 INSTEAD OF 3/3:
+              //   - If one run fails (API glitch, parse error, empty
+              //     response), a real vulnerability is not silently lost
+              //   - A finding seen in 2/3 identical temperature-0 runs
+              //     is still highly consistent — not a random artifact
+              //   - Protects against transient infrastructure failures
+              //     without sacrificing signal quality
+              //
+              // The line grouping (±5 lines) handles minor line number
+              // drift for the same underlying issue across runs.
+              // When duplicates exist, the highest certainty version
+              // is kept for the final report.
+              const deduplicateFindings = (allFindings, successfulRuns) => {
                 const certaintyRank = { Confirmed: 4, Likely: 3, Possible: 2, Unlikely: 1 };
+
+                // Dynamic threshold — if only 2 runs succeeded, require
+                // both; if all 3 succeeded, require at least 2
+                const threshold = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
+                console.log(`  Dedup threshold: ${threshold}/${successfulRuns} successful runs`);
+
                 const seen = new Map();
 
                 for (const f of allFindings) {
@@ -736,14 +748,17 @@ jobs:
                   } else {
                     const existing = seen.get(key);
                     existing.count += 1;
+                    // Keep highest certainty version across runs
                     const newRank = certaintyRank[f.certainty] ?? 0;
                     const oldRank = certaintyRank[existing.finding.certainty] ?? 0;
                     if (newRank > oldRank) existing.finding = f;
                   }
                 }
 
+                // ── QUORUM FILTER ──
+                // Keep findings seen in at least `threshold` runs
                 return Array.from(seen.values())
-                  .filter(entry => entry.count >= requiredRuns)
+                  .filter(entry => entry.count >= threshold)
                   .map(entry => entry.finding);
               };
 
@@ -751,6 +766,7 @@ jobs:
               const allRawFindings = [];
               let totalInputTokens  = 0;
               let totalOutputTokens = 0;
+              let successfulRuns    = 0;
               let hardFailure       = null;
 
               for (let i = 0; i < NUM_RUNS; i++) {
@@ -776,26 +792,48 @@ jobs:
                   continue;
                 }
 
+                // Only count a run as successful if it returned
+                // a parseable response (even if zero findings)
+                successfulRuns += 1;
                 allRawFindings.push(...result.findings);
                 totalInputTokens  += result.usage.input_tokens  ?? 0;
                 totalOutputTokens += result.usage.output_tokens ?? 0;
               }
 
-              if (allRawFindings.length === 0 && hardFailure) {
+              // ─── ABORT if fewer than MIN_RUNS_REQUIRED succeeded ───
+              // If only 0 or 1 run succeeded we cannot apply a meaningful
+              // quorum filter — abort rather than report unreliable data
+              if (successfulRuns < MIN_RUNS_REQUIRED) {
+                const reason = successfulRuns === 0
+                  ? 'All API calls failed.'
+                  : `Only ${successfulRuns}/${NUM_RUNS} runs succeeded — minimum required is ${MIN_RUNS_REQUIRED}.`;
                 await sendSlackAlert(
-                  `🔴 *Security Review Failed — All Runs Failed*\n` +
+                  `🔴 *Security Review Failed — Insufficient Successful Runs*\n` +
                   `> *Repo*: ${repoLabel}\n> *PR*: <${prLink}|#${context.issue.number}>\n` +
-                  `> *Detail*: ${hardFailure}`
+                  `> *Reason*: ${reason}\n` +
+                  `> *Detail*: ${hardFailure ?? 'Unknown error'}`
                 );
-                core.setFailed(`All API calls failed. Last error: ${hardFailure}`);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: [
+                    "## Security Review — Failed ⚠️",
+                    "",
+                    `> **Reason**: ${reason}`,
+                    "> Reported to security team."
+                  ].join("\n")
+                });
+                core.setFailed(`Security review aborted: ${reason}`);
                 return;
               }
 
               console.log(`─── Multi-Run Summary ─────────────────────`);
               console.log(`  Temperature                        : ${TEMPERATURE} (all runs)`);
+              console.log(`  Successful runs                    : ${successfulRuns}/${NUM_RUNS}`);
               console.log(`  Total raw findings (before dedup)  : ${allRawFindings.length}`);
-              const dedupedFindings = deduplicateFindings(allRawFindings);
-              console.log(`  After intersection filter (${NUM_RUNS}/${NUM_RUNS})   : ${dedupedFindings.length}`);
+              const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
+              console.log(`  After quorum filter (>=${MIN_RUNS_REQUIRED}/${NUM_RUNS})       : ${dedupedFindings.length}`);
               console.log(`  Total input  tokens                : ${totalInputTokens}`);
               console.log(`  Total output tokens                : ${totalOutputTokens}`);
               console.log(`───────────────────────────────────────────`);
@@ -856,10 +894,13 @@ jobs:
 
               let commentBody = `## Security Review\n\n`;
               commentBody    += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
+              if (successfulRuns < NUM_RUNS) {
+                commentBody  += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed successfully — one run failed but quorum was still met.\n\n`;
+              }
               commentBody    += `**Summary**: ${totalFindings} issue(s) found — `;
               commentBody    += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
-              commentBody    += `> 🔒 CVSS v3.1 scores computed deterministically from vector metrics by the CI system — not by the AI model. Same diff will always produce the same score.\n\n`;
-              commentBody    += `> 🔁 Only findings confirmed across all ${NUM_RUNS} independent scans at temperature 0 are reported.\n\n`;
+              commentBody    += `> 🔒 CVSS v3.1 scores computed deterministically from vector metrics by the CI system — not by the AI model.\n\n`;
+              commentBody    += `> 🔁 Only findings confirmed in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} independent scans are reported.\n\n`;
               commentBody    += `---\n\n`;
 
               for (const sev of severityOrder) {
@@ -903,10 +944,11 @@ jobs:
               // ─── Footer ────────────────────────────────────────────
               const footerLines = [
                 `> 🤖 **Model**: \`${MODEL}\``,
-                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
-                `> 📊 **Tokens** — Input: \`${totalInputTokens}\` | Output: \`${totalOutputTokens}\` (across ${NUM_RUNS} runs)`,
+                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all runs)`,
+                `> ✅ **Successful Runs**: ${successfulRuns}/${NUM_RUNS}`,
+                `> 📊 **Tokens** — Input: \`${totalInputTokens}\` | Output: \`${totalOutputTokens}\` (across ${successfulRuns} successful runs)`,
                 `> 📅 **Scanned**: ${today}`,
-                `> 🔁 **Runs**: ${NUM_RUNS} independent scans at temperature 0 — only findings present in ALL runs are reported`,
+                `> 🔁 **Quorum**: findings present in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs are reported`,
                 `> 🔢 **Scoring**: CVSS v3.1 Base Score computed by CI system from vector metrics. Model outputs metric letters only — never scores or severity labels.`,
               ];
               if (wasTruncated) {
@@ -933,10 +975,15 @@ jobs:
                 `> *PR*: <${prLink}|#${context.issue.number}>`,
                 `> *Model*: \`${MODEL}\``,
                 `> *Temperature*: \`${TEMPERATURE}\` (all runs)`,
+                `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
                 `> *Scanned*: ${today}`,
                 `> *Summary*: Critical: ${groups.Critical.length} | High: ${groups.High.length} | Medium: ${groups.Medium.length} | Low: ${groups.Low.length} | Info: ${groups.Info.length}`,
-                `> *Filter*: Intersection — only findings seen in all ${NUM_RUNS} runs at temperature 0 reported`,
+                `> *Filter*: Quorum — findings seen in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs reported`,
               ];
+
+              if (successfulRuns < NUM_RUNS) {
+                summaryLines.push(`> ⚠️ *Note*: ${NUM_RUNS - successfulRuns} run(s) failed — quorum still met with ${successfulRuns} successful runs`);
+              }
 
               if (totalFindings > 0) {
                 summaryLines.push('');
