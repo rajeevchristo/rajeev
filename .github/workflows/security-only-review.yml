@@ -159,15 +159,12 @@ jobs:
             const fs = require('fs');
 
             // ─── CONFIG ────────────────────────────────────────────────
-            const MAX_DIFF_CHARS  = 120000;
-            const MAX_TOKENS      = 8000;
-            const MODEL           = "claude-haiku-4-5";
-            const NUM_RUNS        = 3;
-            const TEMPERATURE     = 0;
-            // A finding must appear in at least MIN_RUNS_REQUIRED out of
-            // NUM_RUNS to be reported. Set to 2 so one failed or divergent
-            // run does not suppress a real vulnerability.
-            const MIN_RUNS_REQUIRED = 2;
+            const MAX_DIFF_CHARS    = 120000;
+            const MAX_TOKENS        = 8000;
+            const MODEL             = "claude-haiku-4-5";
+            const NUM_RUNS          = 5;
+            const TEMPERATURE       = 0;
+            const MIN_RUNS_REQUIRED = 3;
             // ───────────────────────────────────────────────────────────
 
             // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
@@ -294,16 +291,9 @@ jobs:
               return;
             }
 
-            console.log(`Raw diff size  : ${rawDiff.length} chars`);
-            console.log(`Sent to model  : ${truncatedDiff.length} chars`);
-            console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
-            console.log(`Output tokens (max):     ${MAX_TOKENS}`);
-            console.log(`Temperature    : ${TEMPERATURE} (all runs)`);
-            console.log(`Min runs required: ${MIN_RUNS_REQUIRED}/${NUM_RUNS}`);
-            if (wasTruncated) console.log('WARNING: Diff was truncated — some changes were NOT reviewed!');
-
             const today = new Date().toISOString().split('T')[0];
 
+            // ─── SYSTEM PROMPT ─────────────────────────────────────────
             const systemPrompt = [
               "You are a senior application security engineer performing a thorough code security audit.",
               "Your ONLY job is to find real security vulnerabilities in the diff provided.",
@@ -355,8 +345,6 @@ jobs:
               "================================================================",
               "STEP 3 — INJECTION CHECKLIST",
               "================================================================",
-              "",
-              "For every ADDED line, work through each item:",
               "",
               "[ ] SQL Injection (CWE-89)",
               "    Is user input concatenated or interpolated into a SQL string?",
@@ -439,8 +427,7 @@ jobs:
               "      - Variable named: secret, password, token, key, apiKey, credentials",
               "      - Known prefixes: sk-, pk-, ghp_, ghs_, AKIA, SG., xox, rk_live_",
               "      - Long random-looking alphanumeric strings (32+ chars) in assignments",
-              "      - Default parameter values that look like real secrets:",
-              "        os.getenv('KEY', 'fallback-hardcoded-value')",
+              "      - Default parameter values that look like real secrets",
               "      - Base64 or hex encoded strings assigned to credential variables",
               "      - Secrets inside comments: // password is Admin123",
               "      - Secrets in config objects: { host: 'db', pass: 'abc123' }",
@@ -531,66 +518,35 @@ jobs:
               "    UNSAFE : yaml.load(data) without Loader=yaml.SafeLoader",
               "",
               "[ ] Dependency Confusion (CWE-427)",
-              "    Are new internal package names added that could be typosquatted",
-              "    or registered on public registries (npm, PyPI)?",
+              "    Are new internal package names added that could be typosquatted?",
               "",
               "[ ] Insecure Direct Storage (CWE-313)",
               "    Is sensitive data written to disk without encryption?",
               "",
               "[ ] Race Condition / TOCTOU (CWE-362)",
               "    Is shared state modified without locks?",
-              "    Is a check-then-use pattern present where state can change between?",
               "",
               "================================================================",
               "CVSS METRIC SELECTION RULES",
               "================================================================",
               "",
-              "AV (Attack Vector)",
-              "  N = Exploitable remotely over the internet",
-              "  A = Requires same local network or Bluetooth",
-              "  L = Requires local OS user account on the machine",
-              "  P = Requires physical hardware access",
+              "AV: N=internet A=local-network L=local-account P=physical",
+              "AC: L=no-special-conditions H=requires-specific-state",
+              "PR: N=no-auth L=regular-user H=admin",
+              "UI: N=no-victim-action R=victim-must-interact",
+              "S:  U=impact-contained C=impact-crosses-components",
+              "C:  H=all-data-exposed L=partial-data N=no-impact",
+              "I:  H=all-data-modified L=partial-data N=no-impact",
+              "A:  H=service-down L=degraded N=no-impact",
               "",
-              "AC (Attack Complexity)",
-              "  L = No special conditions or prerequisites required",
-              "  H = Requires race condition, specific config, or hard-to-reproduce state",
-              "",
-              "PR (Privileges Required)",
-              "  N = No login or account needed to exploit",
-              "  L = Regular authenticated user account needed",
-              "  H = Administrator or privileged account needed",
-              "",
-              "UI (User Interaction)",
-              "  N = Attacker can exploit with no victim action needed",
-              "  R = A victim must click, open, or interact",
-              "",
-              "S (Scope)",
-              "  U = Impact stays within the vulnerable component only",
-              "  C = Impact can reach other components or systems",
-              "",
-              "C (Confidentiality Impact)",
-              "  H = Total loss — attacker can read all data",
-              "  L = Partial loss — some data exposed",
-              "  N = No confidentiality impact",
-              "",
-              "I (Integrity Impact)",
-              "  H = Total loss — attacker can modify any data",
-              "  L = Partial loss — some data can be modified",
-              "  N = No integrity impact",
-              "",
-              "A (Availability Impact)",
-              "  H = Total loss — service can be completely shut down",
-              "  L = Reduced performance or intermittent outages",
-              "  N = No availability impact",
-              "",
-              "CERTAINTY",
-              "  Confirmed — Vulnerable line(s) directly visible in diff, no ambiguity",
-              "  Likely    — Strong risk pattern, full exploit depends on calling context",
-              "  Possible  — Suspicious pattern, requires assumptions outside the diff",
-              "  Unlikely  — Theoretical edge-case, low confidence",
+              "CERTAINTY:",
+              "  Confirmed — vulnerable line directly visible in diff",
+              "  Likely    — strong pattern, depends on calling context",
+              "  Possible  — suspicious, requires assumptions",
+              "  Unlikely  — theoretical edge case",
               "",
               "================================================================",
-              "OUTPUT FORMAT — RETURN THIS EXACT JSON STRUCTURE",
+              "OUTPUT FORMAT",
               "================================================================",
               "",
               "{",
@@ -636,11 +592,36 @@ jobs:
               "Diff to analyze:\n" +
               truncatedDiff;
 
+            // ─── TOKEN ESTIMATES (before API calls) ───────────────────
+            // Anthropic tokenizer: ~4 chars per token for English/code
+            // These are estimates — actual counts come from API response
+            const systemPromptChars  = systemPrompt.length;
+            const diffChars          = truncatedDiff.length;
+            const userPromptChars    = userPrompt.length; // includes diff
+            const systemPromptTokensEst = Math.round(systemPromptChars / 4);
+            const diffTokensEst         = Math.round(diffChars / 4);
+            const totalInputTokensEst   = Math.round((systemPromptChars + userPromptChars) / 4);
+
+            console.log(`════════════════════════════════════════════════`);
+            console.log(`  TOKEN ESTIMATES (before API calls)`);
+            console.log(`════════════════════════════════════════════════`);
+            console.log(`  System prompt chars     : ${systemPromptChars}`);
+            console.log(`  System prompt tokens    : ~${systemPromptTokensEst}`);
+            console.log(`  Diff chars              : ${diffChars}`);
+            console.log(`  Diff tokens (est)       : ~${diffTokensEst}`);
+            console.log(`  User prompt tokens (est): ~${Math.round(userPromptChars / 4)}`);
+            console.log(`  Total input  (est/call) : ~${totalInputTokensEst}`);
+            console.log(`  Total input  (est/total): ~${totalInputTokensEst * NUM_RUNS} (${NUM_RUNS} runs)`);
+            console.log(`  Max output tokens/call  : ${MAX_TOKENS}`);
+            console.log(`  Max output total        : ${MAX_TOKENS * NUM_RUNS} (${NUM_RUNS} runs)`);
+            console.log(`  Diff truncated          : ${wasTruncated}`);
+            console.log(`════════════════════════════════════════════════`);
+
             try {
 
               // ─── HELPER: single Claude API call ───────────────────
               const callClaude = async (runIndex) => {
-                console.log(`Run ${runIndex + 1}/${NUM_RUNS} — calling Claude Haiku 4.5 (temperature: ${TEMPERATURE})...`);
+                console.log(`\nRun ${runIndex + 1}/${NUM_RUNS} — calling ${MODEL} (temperature: ${TEMPERATURE})...`);
 
                 const controller = new AbortController();
                 const timeoutId  = setTimeout(() => controller.abort(), 120000);
@@ -681,7 +662,23 @@ jobs:
                   .trim();
 
                 const usage = data.usage || {};
-                console.log(`  Run ${runIndex + 1} tokens — input: ${usage.input_tokens ?? 'N/A'} output: ${usage.output_tokens ?? 'N/A'}`);
+
+                // ── Per-run token breakdown ──
+                // cache_creation_input_tokens and cache_read_input_tokens
+                // are present if prompt caching is active on your account
+                const inputTok        = usage.input_tokens              ?? 0;
+                const outputTok       = usage.output_tokens             ?? 0;
+                const cacheCreateTok  = usage.cache_creation_input_tokens ?? 0;
+                const cacheReadTok    = usage.cache_read_input_tokens     ?? 0;
+
+                console.log(`  ┌─ Run ${runIndex + 1} token breakdown ─────────────────`);
+                console.log(`  │  Input tokens (total)      : ${inputTok}`);
+                console.log(`  │    of which system prompt  : ~${systemPromptTokensEst} (est)`);
+                console.log(`  │    of which diff + prompt  : ~${inputTok - systemPromptTokensEst > 0 ? inputTok - systemPromptTokensEst : 'N/A'} (est)`);
+                if (cacheCreateTok > 0) console.log(`  │  Cache creation tokens     : ${cacheCreateTok}`);
+                if (cacheReadTok   > 0) console.log(`  │  Cache read tokens         : ${cacheReadTok}`);
+                console.log(`  │  Output tokens             : ${outputTok}`);
+                console.log(`  └────────────────────────────────────────────`);
 
                 if (!rawText) {
                   console.warn(`  Run ${runIndex + 1} returned empty response — skipping.`);
@@ -700,10 +697,10 @@ jobs:
                     return { error: false, findings: [], usage };
                   }
                   if (firstBrace > 0) {
-                    console.warn(`  Run ${runIndex + 1} — model output ${firstBrace} chars before JSON, extracted block only.`);
+                    console.warn(`  Run ${runIndex + 1} — ${firstBrace} chars before JSON stripped.`);
                   }
                   cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-                  const parsed = JSON.parse(cleaned);
+                  const parsed   = JSON.parse(cleaned);
                   const findings = Array.isArray(parsed?.findings) ? parsed.findings : [];
                   console.log(`  Run ${runIndex + 1} — ${findings.length} finding(s) parsed.`);
                   return { error: false, findings, usage };
@@ -714,31 +711,12 @@ jobs:
               };
 
               // ─── QUORUM DEDUPLICATION ──────────────────────────────
-              // A finding is reported if it appears in at least
-              // MIN_RUNS_REQUIRED out of NUM_RUNS runs (2 out of 3).
-              //
-              // WHY 2/3 INSTEAD OF 3/3:
-              //   - If one run fails (API glitch, parse error, empty
-              //     response), a real vulnerability is not silently lost
-              //   - A finding seen in 2/3 identical temperature-0 runs
-              //     is still highly consistent — not a random artifact
-              //   - Protects against transient infrastructure failures
-              //     without sacrificing signal quality
-              //
-              // The line grouping (±5 lines) handles minor line number
-              // drift for the same underlying issue across runs.
-              // When duplicates exist, the highest certainty version
-              // is kept for the final report.
               const deduplicateFindings = (allFindings, successfulRuns) => {
                 const certaintyRank = { Confirmed: 4, Likely: 3, Possible: 2, Unlikely: 1 };
-
-                // Dynamic threshold — if only 2 runs succeeded, require
-                // both; if all 3 succeeded, require at least 2
-                const threshold = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
-                console.log(`  Dedup threshold: ${threshold}/${successfulRuns} successful runs`);
+                const threshold     = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
+                console.log(`\n  Quorum threshold: ${threshold}/${successfulRuns} successful runs`);
 
                 const seen = new Map();
-
                 for (const f of allFindings) {
                   const lineGroup = Math.floor((f.line ?? 0) / 5) * 5;
                   const key = ((f.cwe ?? 'UNKNOWN') + '::' + (f.file ?? '') + '::' + lineGroup).toUpperCase();
@@ -748,24 +726,29 @@ jobs:
                   } else {
                     const existing = seen.get(key);
                     existing.count += 1;
-                    // Keep highest certainty version across runs
                     const newRank = certaintyRank[f.certainty] ?? 0;
                     const oldRank = certaintyRank[existing.finding.certainty] ?? 0;
                     if (newRank > oldRank) existing.finding = f;
                   }
                 }
 
-                // ── QUORUM FILTER ──
-                // Keep findings seen in at least `threshold` runs
+                console.log(`  Per-finding quorum counts:`);
+                for (const [key, entry] of seen.entries()) {
+                  const status = entry.count >= threshold ? '✅' : '❌';
+                  console.log(`    ${status} [${entry.count}/${successfulRuns}] ${key}`);
+                }
+
                 return Array.from(seen.values())
                   .filter(entry => entry.count >= threshold)
                   .map(entry => entry.finding);
               };
 
-              // ─── THREE INDEPENDENT RUNS ────────────────────────────
-              const allRawFindings = [];
+              // ─── FIVE INDEPENDENT RUNS ─────────────────────────────
+              const allRawFindings  = [];
               let totalInputTokens  = 0;
               let totalOutputTokens = 0;
+              let totalCacheCreate  = 0;
+              let totalCacheRead    = 0;
               let successfulRuns    = 0;
               let hardFailure       = null;
 
@@ -787,22 +770,20 @@ jobs:
                     core.setFailed("Security review skipped: rate limit.");
                     return;
                   }
-                  console.warn(`Run ${i + 1} failed (HTTP ${result.status}): ${result.errorMsg} — continuing with other runs.`);
+                  console.warn(`Run ${i + 1} failed (HTTP ${result.status}): ${result.errorMsg} — continuing.`);
                   hardFailure = result.errorMsg;
                   continue;
                 }
 
-                // Only count a run as successful if it returned
-                // a parseable response (even if zero findings)
-                successfulRuns += 1;
+                successfulRuns    += 1;
+                totalInputTokens  += result.usage.input_tokens              ?? 0;
+                totalOutputTokens += result.usage.output_tokens             ?? 0;
+                totalCacheCreate  += result.usage.cache_creation_input_tokens ?? 0;
+                totalCacheRead    += result.usage.cache_read_input_tokens     ?? 0;
                 allRawFindings.push(...result.findings);
-                totalInputTokens  += result.usage.input_tokens  ?? 0;
-                totalOutputTokens += result.usage.output_tokens ?? 0;
               }
 
-              // ─── ABORT if fewer than MIN_RUNS_REQUIRED succeeded ───
-              // If only 0 or 1 run succeeded we cannot apply a meaningful
-              // quorum filter — abort rather than report unreliable data
+              // ─── ABORT if not enough runs succeeded ───────────────
               if (successfulRuns < MIN_RUNS_REQUIRED) {
                 const reason = successfulRuns === 0
                   ? 'All API calls failed.'
@@ -828,20 +809,38 @@ jobs:
                 return;
               }
 
-              console.log(`─── Multi-Run Summary ─────────────────────`);
-              console.log(`  Temperature                        : ${TEMPERATURE} (all runs)`);
-              console.log(`  Successful runs                    : ${successfulRuns}/${NUM_RUNS}`);
-              console.log(`  Total raw findings (before dedup)  : ${allRawFindings.length}`);
+              // ─── DEDUPLICATION ────────────────────────────────────
               const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
-              console.log(`  After quorum filter (>=${MIN_RUNS_REQUIRED}/${NUM_RUNS})       : ${dedupedFindings.length}`);
-              console.log(`  Total input  tokens                : ${totalInputTokens}`);
-              console.log(`  Total output tokens                : ${totalOutputTokens}`);
-              console.log(`───────────────────────────────────────────`);
 
-              const rawFindings = dedupedFindings;
+              // ─── FULL TOKEN SUMMARY ────────────────────────────────
+              // Actual counts from API responses + breakdown by component
+              const avgInputPerRun  = successfulRuns > 0 ? Math.round(totalInputTokens  / successfulRuns) : 0;
+              const avgOutputPerRun = successfulRuns > 0 ? Math.round(totalOutputTokens / successfulRuns) : 0;
+
+              console.log(`\n════════════════════════════════════════════════`);
+              console.log(`  FINAL TOKEN SUMMARY`);
+              console.log(`════════════════════════════════════════════════`);
+              console.log(`  ── Estimates (chars / 4) ──────────────────`);
+              console.log(`  System prompt tokens (est)  : ~${systemPromptTokensEst} per run`);
+              console.log(`  Diff tokens (est)           : ~${diffTokensEst} per run`);
+              console.log(`  User prompt tokens (est)    : ~${Math.round(userPrompt.length / 4)} per run`);
+              console.log(`  Total input est per run     : ~${totalInputTokensEst}`);
+              console.log(`  ── Actuals (from API) ─────────────────────`);
+              console.log(`  Successful runs             : ${successfulRuns}/${NUM_RUNS}`);
+              console.log(`  Input tokens per run (avg)  : ${avgInputPerRun}`);
+              console.log(`  Output tokens per run (avg) : ${avgOutputPerRun}`);
+              console.log(`  Total input tokens          : ${totalInputTokens}`);
+              console.log(`  Total output tokens         : ${totalOutputTokens}`);
+              if (totalCacheCreate > 0) console.log(`  Cache creation tokens       : ${totalCacheCreate}`);
+              if (totalCacheRead   > 0) console.log(`  Cache read tokens           : ${totalCacheRead}`);
+              console.log(`  Grand total tokens          : ${totalInputTokens + totalOutputTokens}`);
+              console.log(`  ── Findings ───────────────────────────────`);
+              console.log(`  Raw findings (all runs)     : ${allRawFindings.length}`);
+              console.log(`  After quorum (${MIN_RUNS_REQUIRED}/${NUM_RUNS})          : ${dedupedFindings.length}`);
+              console.log(`════════════════════════════════════════════════`);
 
               // ─── DETERMINISTIC SCORING ─────────────────────────────
-              const findings = rawFindings.map((f, idx) => {
+              const findings = dedupedFindings.map((f, idx) => {
                 const cweKey           = (f.cwe ?? '').toUpperCase().replace(/\s/g, '');
                 const canonicalMetrics = CWE_VECTORS[cweKey];
                 const metrics          = canonicalMetrics ?? f.metrics;
@@ -866,7 +865,7 @@ jobs:
                   validCI.includes(metrics.A);
 
                 if (!isValid) {
-                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid or missing metrics — skipping CVSS scoring.`);
+                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid metrics — skipping CVSS scoring.`);
                   return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', usedCanonical };
                 }
 
@@ -874,8 +873,7 @@ jobs:
                 const severity = getSeverity(score);
                 const vector   = getVector(metrics);
 
-                console.log(`Finding ${idx + 1}: "${f.title}" | CWE: ${f.cwe} | Vector: ${vector} | Score: ${score} | Severity: ${severity}${usedCanonical ? ' [canonical]' : ' [model metrics]'}`);
-
+                console.log(`Finding ${idx + 1}: "${f.title}" | ${f.cwe} | ${score} | ${severity}`);
                 return { ...f, metrics, score, severity, vector, usedCanonical };
               });
 
@@ -884,7 +882,6 @@ jobs:
               for (const f of findings) {
                 (groups[f.severity] ?? groups.Unknown).push(f);
               }
-
               const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
 
               // ─── Build PR comment ──────────────────────────────────
@@ -892,16 +889,16 @@ jobs:
               const severityEmoji = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
               const prefixMap     = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
 
-              let commentBody = `## Security Review\n\n`;
-              commentBody    += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
+              let commentBody  = `## Security Review\n\n`;
+              commentBody     += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
               if (successfulRuns < NUM_RUNS) {
-                commentBody  += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed successfully — one run failed but quorum was still met.\n\n`;
+                commentBody   += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed — quorum still met.\n\n`;
               }
-              commentBody    += `**Summary**: ${totalFindings} issue(s) found — `;
-              commentBody    += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
-              commentBody    += `> 🔒 CVSS v3.1 scores computed deterministically from vector metrics by the CI system — not by the AI model.\n\n`;
-              commentBody    += `> 🔁 Only findings confirmed in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} independent scans are reported.\n\n`;
-              commentBody    += `---\n\n`;
+              commentBody     += `**Summary**: ${totalFindings} issue(s) found — `;
+              commentBody     += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
+              commentBody     += `> 🔒 CVSS v3.1 scores computed deterministically by the CI system — not by the AI model.\n\n`;
+              commentBody     += `> 🔁 Only findings confirmed in at least **${MIN_RUNS_REQUIRED}/${NUM_RUNS}** independent scans are reported.\n\n`;
+              commentBody     += `---\n\n`;
 
               for (const sev of severityOrder) {
                 const group = groups[sev];
@@ -925,11 +922,7 @@ jobs:
                   commentBody += `- **CVSS Breakdown**:\n`;
                   commentBody += `  - AV: ${f.metrics.AV} | AC: ${f.metrics.AC} | PR: ${f.metrics.PR} | UI: ${f.metrics.UI}\n`;
                   commentBody += `  - S: ${f.metrics.S} | C: ${f.metrics.C} | I: ${f.metrics.I} | A: ${f.metrics.A}\n`;
-                  if (f.usedCanonical) {
-                    commentBody += `- **Vector Source**: Canonical CWE lookup table (deterministic)\n`;
-                  } else {
-                    commentBody += `- **Vector Source**: Model-assigned metrics (temperature=0)\n`;
-                  }
+                  commentBody += `- **Vector Source**: ${f.usedCanonical ? 'Canonical CWE lookup table (deterministic)' : 'Model-assigned metrics (temperature=0)'}\n`;
                   commentBody += `- **Certainty**: ${f.certainty}\n`;
                   commentBody += `- **CWE**: ${f.cwe}\n`;
                   commentBody += `- **OWASP**: ${f.owasp}\n`;
@@ -941,18 +934,33 @@ jobs:
                 commentBody += `---\n\n`;
               }
 
-              // ─── Footer ────────────────────────────────────────────
+              // ─── Footer with full token breakdown ─────────────────
               const footerLines = [
                 `> 🤖 **Model**: \`${MODEL}\``,
-                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all runs)`,
+                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
                 `> ✅ **Successful Runs**: ${successfulRuns}/${NUM_RUNS}`,
-                `> 📊 **Tokens** — Input: \`${totalInputTokens}\` | Output: \`${totalOutputTokens}\` (across ${successfulRuns} successful runs)`,
                 `> 📅 **Scanned**: ${today}`,
-                `> 🔁 **Quorum**: findings present in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs are reported`,
-                `> 🔢 **Scoring**: CVSS v3.1 Base Score computed by CI system from vector metrics. Model outputs metric letters only — never scores or severity labels.`,
+                `> 🔁 **Quorum**: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings must appear in at least ${MIN_RUNS_REQUIRED} runs`,
+                `> 🔢 **Scoring**: CVSS v3.1 computed by CI system. Model outputs metric letters only.`,
+                `>`,
+                `> **Token Breakdown**`,
+                `> | Component | Per Run (est) | Total (${successfulRuns} runs actual) |`,
+                `> |-----------|--------------|-------------------------------|`,
+                `> | System prompt | ~${systemPromptTokensEst} tokens | ~${systemPromptTokensEst * successfulRuns} tokens |`,
+                `> | Diff + user prompt | ~${Math.round(userPrompt.length / 4)} tokens | ~${Math.round(userPrompt.length / 4) * successfulRuns} tokens |`,
+                `> | **Total input** | ~${totalInputTokensEst} tokens (est) | **${totalInputTokens} tokens (actual)** |`,
+                `> | **Total output** | ~${avgOutputPerRun} tokens (avg) | **${totalOutputTokens} tokens (actual)** |`,
+                `> | **Grand total** | — | **${totalInputTokens + totalOutputTokens} tokens** |`,
               ];
+              if (totalCacheCreate > 0) {
+                footerLines.push(`> | Cache creation | — | ${totalCacheCreate} tokens |`);
+              }
+              if (totalCacheRead > 0) {
+                footerLines.push(`> | Cache read | — | ${totalCacheRead} tokens |`);
+              }
               if (wasTruncated) {
-                footerLines.push(`> ⚠️ **Warning**: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+                footerLines.push(`> `);
+                footerLines.push(`> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed. Consider splitting this PR.`);
               }
               commentBody += footerLines.join('\n') + '\n';
 
@@ -964,7 +972,7 @@ jobs:
                 body: commentBody
               });
 
-              console.log(`Security review posted successfully on PR #${context.issue.number}`);
+              console.log(`\nSecurity review posted on PR #${context.issue.number}`);
 
               // ─── Slack summary ─────────────────────────────────────
               const summaryLines = [
@@ -978,11 +986,13 @@ jobs:
                 `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
                 `> *Scanned*: ${today}`,
                 `> *Summary*: Critical: ${groups.Critical.length} | High: ${groups.High.length} | Medium: ${groups.Medium.length} | Low: ${groups.Low.length} | Info: ${groups.Info.length}`,
-                `> *Filter*: Quorum — findings seen in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs reported`,
+                `> *Quorum*: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings seen in at least ${MIN_RUNS_REQUIRED} runs reported`,
+                `> *Tokens*: Input ${totalInputTokens} | Output ${totalOutputTokens} | Total ${totalInputTokens + totalOutputTokens}`,
+                `> *Token Breakdown*: System ~${systemPromptTokensEst}/run | Diff ~${diffTokensEst}/run`,
               ];
 
               if (successfulRuns < NUM_RUNS) {
-                summaryLines.push(`> ⚠️ *Note*: ${NUM_RUNS - successfulRuns} run(s) failed — quorum still met with ${successfulRuns} successful runs`);
+                summaryLines.push(`> ⚠️ *Note*: ${NUM_RUNS - successfulRuns} run(s) failed — quorum still met`);
               }
 
               if (totalFindings > 0) {
@@ -1000,7 +1010,7 @@ jobs:
               }
 
               if (wasTruncated) {
-                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed.`);
               }
 
               await sendSlackAlert(summaryLines.join('\n'));
