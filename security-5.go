@@ -1,0 +1,918 @@
+name: Security-Only PR Review (Claude Haiku 4.5)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch and generate diff
+        run: |
+          git fetch origin "${{ github.base_ref }}" || {
+            echo "::error::Failed to fetch base branch ${{ github.base_ref }}"
+            exit 1
+          }
+          git diff --no-color --unified=2 "origin/${{ github.base_ref }}...HEAD" > diff.txt
+          echo "Diff size: $(wc -c < diff.txt) bytes"
+
+      - name: Check Anthropic API access
+        id: quota_check
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sendSlackAlert = async (message) => {
+              const webhookUrl = process.env.SLACK_WEBHOOK;
+              if (!webhookUrl) {
+                console.warn("SLACK_WEBHOOK secret is not set — skipping Slack alert.");
+                return;
+              }
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: message }),
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+              } catch (slackErr) {
+                console.warn(`Slack alert failed: ${slackErr.message}`);
+              }
+            };
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            let response;
+            try {
+              response = await fetch("https://api.anthropic.com/v1/messages", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-api-key": process.env.ANTHROPIC_API_KEY,
+                  "anthropic-version": "2023-06-01"
+                },
+                body: JSON.stringify({
+                  model: "claude-haiku-4-5",
+                  max_tokens: 1,
+                  messages: [{ role: "user", content: "ping" }]
+                }),
+                signal: controller.signal
+              });
+            } catch (fetchErr) {
+              clearTimeout(timeoutId);
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Anthropic API Unreachable*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Network error or timeout during API ping.\n` +
+                `> *Detail*: \`${fetchErr.message}\``
+              );
+              core.setFailed(`Anthropic API unreachable: ${fetchErr.message}`);
+              return;
+            }
+            clearTimeout(timeoutId);
+
+            if (response.ok) {
+              console.log("Anthropic API check passed.");
+              core.setOutput("quota_ok", "true");
+              return;
+            }
+
+            const errorBody = await response.json().catch(() => ({}));
+            const errorType = errorBody?.error?.type ?? "";
+            const errorMsg  = errorBody?.error?.message ?? JSON.stringify(errorBody);
+
+            console.warn(`Anthropic API check failed (HTTP ${response.status}): ${errorMsg}`);
+            core.setOutput("quota_ok", "false");
+
+            if (response.status === 429 || errorType === "rate_limit_error") {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: [
+                  "## Security Review — Skipped ⚠️",
+                  "",
+                  "> **Reason**: Anthropic API rate limit or quota exceeded.",
+                  "> Reported to security team."
+                ].join("\n")
+              });
+              await sendSlackAlert(
+                `⚠️ *Security Review Skipped — Anthropic API Rate Limit / Quota Exceeded*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Anthropic API returned rate limit or quota error.\n` +
+                `> *Action*: Check your Anthropic API plan or rotate the \`ANTHROPIC_API_KEY\` secret.`
+              );
+              core.setFailed("Security review skipped: Anthropic API rate limit or quota exceeded.");
+            } else if (response.status === 401 || errorType === "authentication_error") {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: [
+                  "## Security Review — Skipped ⚠️",
+                  "",
+                  "> **Reason**: Anthropic API key is invalid or missing.",
+                  "> Reported to security team."
+                ].join("\n")
+              });
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Invalid Anthropic API Key*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: API key is invalid or not set.\n` +
+                `> *Action*: Rotate the \`ANTHROPIC_API_KEY\` secret in repository settings.`
+              );
+              core.setFailed("Security review skipped: Anthropic API key invalid.");
+            } else {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Anthropic API Check Error*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Unexpected error during API check (HTTP ${response.status}).\n` +
+                `> *Detail*: \`${errorMsg}\``
+              );
+              core.setFailed(`Anthropic API check failed with unexpected error (HTTP ${response.status}).`);
+            }
+
+      - name: Run Security-Only Review with Claude Haiku 4.5
+        if: steps.quota_check.outputs.quota_ok == 'true'
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            // ─── CONFIG ────────────────────────────────────────────────
+            const MAX_DIFF_CHARS    = 120000;
+            const MAX_TOKENS        = 8000;
+            const MODEL             = "claude-haiku-4-5";
+            const NUM_RUNS          = 5;
+            const TEMPERATURE       = 0;
+            const MIN_RUNS_REQUIRED = 3;
+            // ───────────────────────────────────────────────────────────
+
+            // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
+            function computeCVSS31(m) {
+              const AV   = { N: 0.85, A: 0.62, L: 0.55, P: 0.20 }[m.AV];
+              const AC   = { L: 0.77, H: 0.44 }[m.AC];
+              const PR_U = { N: 0.85, L: 0.62, H: 0.27 }[m.PR];
+              const PR_C = { N: 0.85, L: 0.68, H: 0.50 }[m.PR];
+              const UI   = { N: 0.85, R: 0.62 }[m.UI];
+              const S    = m.S;
+              const PR   = S === 'C' ? PR_C : PR_U;
+              const C    = { N: 0.00, L: 0.22, H: 0.56 }[m.C];
+              const I    = { N: 0.00, L: 0.22, H: 0.56 }[m.I];
+              const A    = { N: 0.00, L: 0.22, H: 0.56 }[m.A];
+
+              const ISCBase = 1 - (1 - C) * (1 - I) * (1 - A);
+              const ISC     = S === 'U'
+                ? 6.42 * ISCBase
+                : 7.52 * (ISCBase - 0.029) - 3.25 * Math.pow(ISCBase - 0.02, 15);
+
+              if (ISC <= 0) return 0.0;
+
+              const Exploitability = 8.22 * AV * AC * PR * UI;
+              const raw = S === 'U'
+                ? Math.min(ISC + Exploitability, 10)
+                : Math.min(1.08 * (ISC + Exploitability), 10);
+
+              return Math.ceil(raw * 10) / 10;
+            }
+
+            function getSeverity(score) {
+              if (score >= 9.0) return 'Critical';
+              if (score >= 7.0) return 'High';
+              if (score >= 4.0) return 'Medium';
+              if (score >  0.0) return 'Low';
+              return 'Info';
+            }
+
+            function getVector(m) {
+              return `CVSS:3.1/AV:${m.AV}/AC:${m.AC}/PR:${m.PR}/UI:${m.UI}/S:${m.S}/C:${m.C}/I:${m.I}/A:${m.A}`;
+            }
+
+            // ─── CWE CANONICAL VECTOR LOOKUP TABLE ────────────────────
+            const CWE_VECTORS = {
+              'CWE-89':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-77':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-78':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-917': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-94':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-611': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-79':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' },
+              'CWE-80':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' },
+              'CWE-918': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-352': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-287': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-306': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-639': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-862': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-863': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-798': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-259': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-321': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-326': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-327': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-330': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-22':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-434': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-601': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'L', I:'L', A:'N' },
+              'CWE-502': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-20':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'L', A:'N' },
+              'CWE-200': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' },
+              'CWE-209': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' },
+              'CWE-400': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' },
+              'CWE-770': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' },
+            };
+
+            // ─── SLACK ALERT HELPER ────────────────────────────────────
+            const sendSlackAlert = async (message) => {
+              const webhookUrl = process.env.SLACK_WEBHOOK;
+              if (!webhookUrl) {
+                console.warn("SLACK_WEBHOOK secret is not set — skipping Slack alert.");
+                return;
+              }
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: message }),
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+              } catch (slackErr) {
+                console.warn(`Slack alert failed: ${slackErr.message}`);
+              }
+            };
+
+            // ─── READ DIFF ─────────────────────────────────────────────
+            let rawDiff;
+            try {
+              rawDiff = fs.readFileSync('diff.txt', 'utf8');
+            } catch (readErr) {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Could Not Read Diff*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: diff.txt missing or unreadable: ${readErr.message}`
+              );
+              core.setFailed(`Could not read diff.txt: ${readErr.message}`);
+              return;
+            }
+
+            const prLink    = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`;
+            const repoLabel = `${context.repo.owner}/${context.repo.repo}`;
+
+            const wasTruncated  = rawDiff.length > MAX_DIFF_CHARS;
+            const truncatedDiff = wasTruncated
+              ? rawDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
+              : rawDiff;
+
+            if (!truncatedDiff.trim()) {
+              console.log('No diff found. Skipping security review.');
+              return;
+            }
+
+            const today = new Date().toISOString().split('T')[0];
+
+            // ─── SYSTEM PROMPT ─────────────────────────────────────────
+            const systemPrompt = [
+              "You are a senior application security engineer performing a thorough code security audit.",
+              "Your ONLY job is to find real security vulnerabilities in the diff provided.",
+              "",
+              "DO NOT compute CVSS scores. DO NOT assign severity labels.",
+              "Scores and severity are computed deterministically by the calling system.",
+              "Your job is ONLY to find vulnerabilities and select the 8 CVSS metric letters.",
+              "",
+              "OUTPUT: Respond with ONLY a valid raw JSON object. No markdown, no backticks, no explanation.",
+              "",
+              "================================================================",
+              "STEP 1 — MAP ALL USER INPUT SOURCES",
+              "================================================================",
+              "",
+              "Before looking for vulnerabilities, identify every source of",
+              "user-controlled input in the ADDED lines:",
+              "",
+              "  - HTTP params      — req.params, req.query, request.GET, request.POST",
+              "  - Request body     — req.body, request.json(), request.form",
+              "  - Headers          — req.headers, request.META, request.headers",
+              "  - File uploads     — req.file, request.FILES, multipart data",
+              "  - URL path params  — path parameters, route variables",
+              "  - Query strings    — anything parsed from the URL",
+              "  - External data    — values read from DB that originally came from users",
+              "  - Message queues   — payloads consumed from external queues or events",
+              "  - Environment vars — if populated from external/untrusted sources",
+              "",
+              "Note every input source before moving to Step 2.",
+              "",
+              "================================================================",
+              "STEP 2 — TRACE EVERY INPUT TO ITS SINK",
+              "================================================================",
+              "",
+              "For each input source found in Step 1, trace where it flows.",
+              "If it reaches any of these dangerous sinks — flag it:",
+              "",
+              "  SINK                  DANGEROUS IF UNSANITIZED",
+              "  Database query        db.query(), execute(), raw(), string concat in SQL",
+              "  Shell command         exec(), spawn(), system(), popen(), subprocess",
+              "  File path             fs.readFile(), open(), path.join() with user input",
+              "  HTML output           innerHTML, dangerouslySetInnerHTML, res.send(html)",
+              "  Redirect target       res.redirect(), header Location, sendRedirect()",
+              "  Outbound HTTP URL     fetch(url), axios.get(url), requests.get(url)",
+              "  Eval / code exec      eval(), new Function(), compile(), importlib",
+              "  Log statement         console.log(), logger.info() with sensitive values",
+              "  Deserializer          pickle.loads(), unserialize(), yaml.load()",
+              "  Template engine       render(), Jinja2, Handlebars with user input",
+              "",
+              "================================================================",
+              "STEP 3 — INJECTION CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] SQL Injection (CWE-89)",
+              "    Is user input concatenated or interpolated into a SQL string?",
+              "    UNSAFE : 'SELECT * FROM users WHERE id = ' + userId",
+              "    SAFE   : parameterized queries, prepared statements, ORM bound params",
+              "",
+              "[ ] Command Injection (CWE-78)",
+              "    Is user input passed to a shell execution function?",
+              "    UNSAFE : exec('convert ' + filename), os.system(userInput)",
+              "    SAFE   : execFile() with array args, subprocess with list not string",
+              "",
+              "[ ] Code Injection (CWE-94)",
+              "    Is user input passed to eval() or dynamic code execution?",
+              "    UNSAFE : eval(userInput), new Function(userInput)",
+              "",
+              "[ ] Template Injection (CWE-1336)",
+              "    Is user input rendered inside a server-side template string?",
+              "    UNSAFE : template.render(userInput), Jinja2 env.from_string(userInput)",
+              "",
+              "[ ] XXE — XML External Entity (CWE-611)",
+              "    Is XML being parsed? Are external entities explicitly disabled?",
+              "",
+              "[ ] Log Injection (CWE-117)",
+              "    Is unsanitized user input written directly to log files?",
+              "",
+              "[ ] LDAP Injection (CWE-90)",
+              "    Is user input used inside an LDAP search filter without escaping?",
+              "",
+              "[ ] XPath Injection (CWE-643)",
+              "    Is user input concatenated into an XPath expression?",
+              "",
+              "================================================================",
+              "STEP 4 — AUTHENTICATION AND ACCESS CONTROL CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Missing Authentication (CWE-306)",
+              "[ ] Missing Authorization (CWE-862)",
+              "[ ] IDOR — Insecure Direct Object Reference (CWE-639)",
+              "[ ] Privilege Escalation (CWE-269)",
+              "[ ] JWT Issues (CWE-347)",
+              "[ ] Session Fixation (CWE-384)",
+              "[ ] Mass Assignment (CWE-915)",
+              "[ ] Broken Access Control (CWE-284)",
+              "",
+              "================================================================",
+              "STEP 5 — SECRETS AND CRYPTOGRAPHY CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Hardcoded Credentials (CWE-798)",
+              "[ ] Hardcoded Crypto Key (CWE-321)",
+              "[ ] Weak Hashing Algorithm (CWE-327) — MD5/SHA1 for passwords",
+              "[ ] Insecure Random (CWE-330) — Math.random() for security tokens",
+              "[ ] Weak Cipher (CWE-326) — DES/3DES/RC4/AES-ECB",
+              "[ ] Missing Encryption (CWE-311)",
+              "",
+              "================================================================",
+              "STEP 6 — INPUT HANDLING AND REQUEST FORGERY CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] XSS — Cross-Site Scripting (CWE-79)",
+              "[ ] SSRF — Server-Side Request Forgery (CWE-918)",
+              "[ ] Open Redirect (CWE-601)",
+              "[ ] Path Traversal (CWE-22)",
+              "[ ] Unrestricted File Upload (CWE-434)",
+              "[ ] CSRF — Cross-Site Request Forgery (CWE-352)",
+              "[ ] HTTP Header Injection (CWE-113)",
+              "[ ] Prototype Pollution (CWE-1321)",
+              "",
+              "================================================================",
+              "STEP 7 — DATA EXPOSURE AND MISCONFIGURATION CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Sensitive Data in Logs (CWE-532)",
+              "[ ] Stack Trace Exposed to Client (CWE-209)",
+              "[ ] Debug Mode Enabled (CWE-215)",
+              "[ ] Insecure Deserialization (CWE-502)",
+              "[ ] Dependency Confusion (CWE-427)",
+              "[ ] Insecure Direct Storage (CWE-313)",
+              "[ ] Race Condition / TOCTOU (CWE-362)",
+              "",
+              "================================================================",
+              "CVSS METRIC SELECTION RULES",
+              "================================================================",
+              "",
+              "AV: N=internet A=local-network L=local-account P=physical",
+              "AC: L=no-special-conditions H=requires-specific-state",
+              "PR: N=no-auth L=regular-user H=admin",
+              "UI: N=no-victim-action R=victim-must-interact",
+              "S:  U=impact-contained C=impact-crosses-components",
+              "C:  H=all-data-exposed L=partial-data N=no-impact",
+              "I:  H=all-data-modified L=partial-data N=no-impact",
+              "A:  H=service-down L=degraded N=no-impact",
+              "",
+              "CERTAINTY:",
+              "  Confirmed — vulnerable line directly visible in diff",
+              "  Likely    — strong pattern, depends on calling context",
+              "  Possible  — suspicious, requires assumptions",
+              "  Unlikely  — theoretical edge case",
+              "",
+              "================================================================",
+              "OUTPUT FORMAT",
+              "================================================================",
+              "",
+              "{",
+              '  "findings": [',
+              "    {",
+              '      "title": "Short vulnerability title max 10 words",',
+              '      "file": "path/to/file.ext",',
+              '      "line": 42,',
+              '      "cwe": "CWE-89",',
+              '      "owasp": "A03:2021",',
+              '      "description": "What the vulnerability is and why it is dangerous.",',
+              '      "fix_before": "the insecure line of code",',
+              '      "fix_after": "the secure replacement",',
+              '      "certainty": "Confirmed|Likely|Possible|Unlikely",',
+              '      "metrics": {',
+              '        "AV": "N|A|L|P",',
+              '        "AC": "L|H",',
+              '        "PR": "N|L|H",',
+              '        "UI": "N|R",',
+              '        "S":  "U|C",',
+              '        "C":  "N|L|H",',
+              '        "I":  "N|L|H",',
+              '        "A":  "N|L|H"',
+              "      }",
+              "    }",
+              "  ]",
+              "}",
+              "",
+              "STRICT RULES:",
+              "- Output ONLY the raw JSON object. No markdown. No backticks. No explanation.",
+              "- Report ONLY real security vulnerabilities. Never comment on style or performance.",
+              "- Every metrics object MUST have all 8 keys with values from the allowed set.",
+              "- If no vulnerabilities found return: { \"findings\": [] }",
+              "- Do NOT compute CVSS scores. Do NOT assign severity labels."
+            ].join("\n");
+
+            const userPrompt =
+              "Analyze the diff below for security vulnerabilities.\n" +
+              "Follow the checklist in the system prompt internally.\n" +
+              "Do NOT write any explanation, thinking, or text before the JSON.\n" +
+              "Your entire response must be a single raw JSON object starting with { and ending with }.\n" +
+              "First character of your response must be { and nothing else.\n\n" +
+              "Diff to analyze:\n" +
+              truncatedDiff;
+
+            // ─── TOKEN ESTIMATES ───────────────────────────────────────
+            const systemPromptChars     = systemPrompt.length;
+            const diffChars             = truncatedDiff.length;
+            const userPromptChars       = userPrompt.length;
+            const systemPromptTokensEst = Math.round(systemPromptChars / 4);
+            const diffTokensEst         = Math.round(diffChars / 4);
+            const totalInputTokensEst   = Math.round((systemPromptChars + userPromptChars) / 4);
+
+            console.log(`════════════════════════════════════════════════`);
+            console.log(`  TOKEN ESTIMATES (before API calls)`);
+            console.log(`════════════════════════════════════════════════`);
+            console.log(`  System prompt chars     : ${systemPromptChars}`);
+            console.log(`  System prompt tokens    : ~${systemPromptTokensEst}`);
+            console.log(`  Diff chars              : ${diffChars}`);
+            console.log(`  Diff tokens (est)       : ~${diffTokensEst}`);
+            console.log(`  Total input est/call    : ~${totalInputTokensEst}`);
+            console.log(`  Total input est/total   : ~${totalInputTokensEst * NUM_RUNS} (${NUM_RUNS} runs)`);
+            console.log(`  Max output tokens/call  : ${MAX_TOKENS}`);
+            console.log(`  Diff truncated          : ${wasTruncated}`);
+            console.log(`════════════════════════════════════════════════`);
+
+            try {
+
+              // ─── HELPER: single Claude API call ───────────────────
+              const callClaude = async (runIndex) => {
+                console.log(`\nRun ${runIndex + 1}/${NUM_RUNS} — calling ${MODEL} (temperature: ${TEMPERATURE})...`);
+
+                const controller = new AbortController();
+                const timeoutId  = setTimeout(() => controller.abort(), 120000);
+                let response;
+                try {
+                  response = await fetch("https://api.anthropic.com/v1/messages", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "x-api-key": process.env.ANTHROPIC_API_KEY,
+                      "anthropic-version": "2023-06-01"
+                    },
+                    body: JSON.stringify({
+                      model: MODEL,
+                      max_tokens: MAX_TOKENS,
+                      temperature: TEMPERATURE,
+                      system: systemPrompt,
+                      messages: [{ role: "user", content: userPrompt }]
+                    }),
+                    signal: controller.signal
+                  });
+                } finally {
+                  clearTimeout(timeoutId);
+                }
+
+                if (!response.ok) {
+                  const errorBody = await response.json().catch(() => ({}));
+                  const errorType = errorBody?.error?.type ?? "";
+                  const errorMsg  = errorBody?.error?.message ?? JSON.stringify(errorBody);
+                  return { error: true, status: response.status, errorType, errorMsg, findings: [], usage: {} };
+                }
+
+                const data    = await response.json();
+                const rawText = (data?.content ?? [])
+                  .filter(b => b.type === "text")
+                  .map(b => b.text)
+                  .join("\n")
+                  .trim();
+
+                const usage          = data.usage || {};
+                const inputTok       = usage.input_tokens               ?? 0;
+                const outputTok      = usage.output_tokens              ?? 0;
+                const cacheCreateTok = usage.cache_creation_input_tokens ?? 0;
+                const cacheReadTok   = usage.cache_read_input_tokens     ?? 0;
+
+                console.log(`  ┌─ Run ${runIndex + 1} tokens ──────────────────────────`);
+                console.log(`  │  Input tokens        : ${inputTok}`);
+                console.log(`  │  Output tokens       : ${outputTok}`);
+                if (cacheCreateTok > 0) console.log(`  │  Cache create tokens : ${cacheCreateTok}`);
+                if (cacheReadTok   > 0) console.log(`  │  Cache read tokens   : ${cacheReadTok}`);
+                console.log(`  └────────────────────────────────────────────`);
+
+                if (!rawText) {
+                  console.warn(`  Run ${runIndex + 1} returned empty response — skipping.`);
+                  return { error: false, findings: [], usage };
+                }
+
+                try {
+                  let cleaned = rawText
+                    .replace(/^```(?:json)?\s*/i, '')
+                    .replace(/\s*```$/, '')
+                    .trim();
+                  const firstBrace = cleaned.indexOf('{');
+                  const lastBrace  = cleaned.lastIndexOf('}');
+                  if (firstBrace === -1 || lastBrace === -1) {
+                    console.warn(`  Run ${runIndex + 1} — no JSON object found.`);
+                    return { error: false, findings: [], usage };
+                  }
+                  if (firstBrace > 0) {
+                    console.warn(`  Run ${runIndex + 1} — ${firstBrace} chars before JSON stripped.`);
+                  }
+                  cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+                  const parsed   = JSON.parse(cleaned);
+                  const findings = Array.isArray(parsed?.findings) ? parsed.findings : [];
+                  console.log(`  Run ${runIndex + 1} — ${findings.length} finding(s) parsed.`);
+                  return { error: false, findings, usage };
+                } catch (parseErr) {
+                  console.warn(`  Run ${runIndex + 1} JSON parse failed: ${parseErr.message}`);
+                  return { error: false, findings: [], usage };
+                }
+              };
+
+              // ─── QUORUM DEDUPLICATION ──────────────────────────────
+              const deduplicateFindings = (allFindings, successfulRuns) => {
+                const certaintyRank = { Confirmed: 4, Likely: 3, Possible: 2, Unlikely: 1 };
+                const threshold     = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
+                console.log(`\n  Quorum threshold: ${threshold}/${successfulRuns}`);
+
+                const seen = new Map();
+                for (const f of allFindings) {
+                  const lineGroup = Math.floor((f.line ?? 0) / 5) * 5;
+                  const key = ((f.cwe ?? 'UNKNOWN') + '::' + (f.file ?? '') + '::' + lineGroup).toUpperCase();
+                  if (!seen.has(key)) {
+                    seen.set(key, { finding: f, count: 1 });
+                  } else {
+                    const existing = seen.get(key);
+                    existing.count += 1;
+                    const newRank = certaintyRank[f.certainty] ?? 0;
+                    const oldRank = certaintyRank[existing.finding.certainty] ?? 0;
+                    if (newRank > oldRank) existing.finding = f;
+                  }
+                }
+
+                console.log(`  Per-finding quorum counts:`);
+                for (const [key, entry] of seen.entries()) {
+                  const status = entry.count >= threshold ? '✅' : '❌';
+                  console.log(`    ${status} [${entry.count}/${successfulRuns}] ${key}`);
+                }
+
+                return Array.from(seen.values())
+                  .filter(entry => entry.count >= threshold)
+                  .map(entry => entry.finding);
+              };
+
+              // ─── FIVE INDEPENDENT RUNS ─────────────────────────────
+              const allRawFindings  = [];
+              let totalInputTokens  = 0;
+              let totalOutputTokens = 0;
+              let totalCacheCreate  = 0;
+              let totalCacheRead    = 0;
+              let successfulRuns    = 0;
+              let hardFailure       = null;
+
+              for (let i = 0; i < NUM_RUNS; i++) {
+                const result = await callClaude(i);
+
+                if (result.error) {
+                  if (result.status === 429 || result.errorType === "rate_limit_error") {
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: context.issue.number,
+                      body: "## Security Review — Skipped ⚠️\n\n> **Reason**: Anthropic API rate limit exceeded during scan."
+                    });
+                    await sendSlackAlert(
+                      `⚠️ *Security Review Skipped — Rate Limit*\n` +
+                      `> *Repo*: ${repoLabel}\n> *PR*: <${prLink}|#${context.issue.number}>`
+                    );
+                    core.setFailed("Security review skipped: rate limit.");
+                    return;
+                  }
+                  console.warn(`Run ${i + 1} failed (HTTP ${result.status}): ${result.errorMsg} — continuing.`);
+                  hardFailure = result.errorMsg;
+                  continue;
+                }
+
+                successfulRuns    += 1;
+                totalInputTokens  += result.usage.input_tokens               ?? 0;
+                totalOutputTokens += result.usage.output_tokens              ?? 0;
+                totalCacheCreate  += result.usage.cache_creation_input_tokens ?? 0;
+                totalCacheRead    += result.usage.cache_read_input_tokens     ?? 0;
+                allRawFindings.push(...result.findings);
+              }
+
+              // ─── ABORT if not enough runs succeeded ───────────────
+              if (successfulRuns < MIN_RUNS_REQUIRED) {
+                const reason = successfulRuns === 0
+                  ? 'All API calls failed.'
+                  : `Only ${successfulRuns}/${NUM_RUNS} runs succeeded — minimum required is ${MIN_RUNS_REQUIRED}.`;
+                await sendSlackAlert(
+                  `🔴 *Security Review Failed — Insufficient Successful Runs*\n` +
+                  `> *Repo*: ${repoLabel}\n> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Reason*: ${reason}\n` +
+                  `> *Detail*: ${hardFailure ?? 'Unknown error'}`
+                );
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: [
+                    "## Security Review — Failed ⚠️",
+                    "",
+                    `> **Reason**: ${reason}`,
+                    "> Reported to security team."
+                  ].join("\n")
+                });
+                core.setFailed(`Security review aborted: ${reason}`);
+                return;
+              }
+
+              // ─── DEDUPLICATION ─────────────────────────────────────
+              const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
+
+              // ─── FINAL TOKEN SUMMARY (Actions log) ────────────────
+              const avgInputPerRun  = successfulRuns > 0 ? Math.round(totalInputTokens  / successfulRuns) : 0;
+              const avgOutputPerRun = successfulRuns > 0 ? Math.round(totalOutputTokens / successfulRuns) : 0;
+
+              console.log(`\n════════════════════════════════════════════════`);
+              console.log(`  FINAL TOKEN SUMMARY`);
+              console.log(`════════════════════════════════════════════════`);
+              console.log(`  System prompt tokens (est/run)  : ~${systemPromptTokensEst}`);
+              console.log(`  Diff tokens (est/run)           : ~${diffTokensEst}`);
+              console.log(`  Total input est/run             : ~${totalInputTokensEst}`);
+              console.log(`  ── Actuals from API ───────────────────────`);
+              console.log(`  Successful runs                 : ${successfulRuns}/${NUM_RUNS}`);
+              console.log(`  Avg input tokens/run            : ${avgInputPerRun}`);
+              console.log(`  Avg output tokens/run           : ${avgOutputPerRun}`);
+              console.log(`  Total input tokens              : ${totalInputTokens}`);
+              console.log(`  Total output tokens             : ${totalOutputTokens}`);
+              if (totalCacheCreate > 0) console.log(`  Cache creation tokens           : ${totalCacheCreate}`);
+              if (totalCacheRead   > 0) console.log(`  Cache read tokens               : ${totalCacheRead}`);
+              console.log(`  Grand total tokens              : ${totalInputTokens + totalOutputTokens}`);
+              console.log(`  Raw findings (all runs)         : ${allRawFindings.length}`);
+              console.log(`  After quorum (${MIN_RUNS_REQUIRED}/${NUM_RUNS})               : ${dedupedFindings.length}`);
+              console.log(`════════════════════════════════════════════════`);
+
+              // ─── DETERMINISTIC SCORING ─────────────────────────────
+              const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info'];
+              const severityEmoji = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
+              const prefixMap     = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
+
+              const findings = dedupedFindings.map((f, idx) => {
+                const cweKey           = (f.cwe ?? '').toUpperCase().replace(/\s/g, '');
+                const canonicalMetrics = CWE_VECTORS[cweKey];
+                const metrics          = canonicalMetrics ?? f.metrics;
+                const usedCanonical    = !!canonicalMetrics;
+
+                const validAV = ['N','A','L','P'];
+                const validAC = ['L','H'];
+                const validPR = ['N','L','H'];
+                const validUI = ['N','R'];
+                const validS  = ['U','C'];
+                const validCI = ['N','L','H'];
+
+                const isValid =
+                  metrics &&
+                  validAV.includes(metrics.AV) &&
+                  validAC.includes(metrics.AC) &&
+                  validPR.includes(metrics.PR) &&
+                  validUI.includes(metrics.UI) &&
+                  validS.includes(metrics.S)   &&
+                  validCI.includes(metrics.C)  &&
+                  validCI.includes(metrics.I)  &&
+                  validCI.includes(metrics.A);
+
+                if (!isValid) {
+                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid metrics.`);
+                  return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', metrics, usedCanonical };
+                }
+
+                const score    = computeCVSS31(metrics);
+                const severity = getSeverity(score);
+                const vector   = getVector(metrics);
+
+                console.log(`Finding ${idx + 1}: "${f.title}" | ${f.cwe} | ${score} | ${severity}`);
+                return { ...f, metrics, score, severity, vector, usedCanonical };
+              });
+
+              // ─── Sort findings by severity order ──────────────────
+              const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3, Info: 4, Unknown: 5 };
+              findings.sort((a, b) => (severityRank[a.severity] ?? 5) - (severityRank[b.severity] ?? 5));
+
+              // ─── Assign IDs after sorting ──────────────────────────
+              const severityCounters = {};
+              findings.forEach(f => {
+                const prefix = prefixMap[f.severity] ?? 'UNK';
+                severityCounters[prefix] = (severityCounters[prefix] ?? 0) + 1;
+                f.id = `${prefix}-${severityCounters[prefix]}`;
+              });
+
+              // ─── Group counts ──────────────────────────────────────
+              const groups = { Critical: [], High: [], Medium: [], Low: [], Info: [], Unknown: [] };
+              for (const f of findings) {
+                (groups[f.severity] ?? groups.Unknown).push(f);
+              }
+              const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
+
+              // ═══════════════════════════════════════════════════════
+              // PR COMMENT — developer-facing only
+              // One flat table at top, then all detail blocks below
+              // No token info, no CVSS breakdown, no vector, no meta
+              // ═══════════════════════════════════════════════════════
+              let commentBody  = `## Security Review\n\n`;
+              commentBody     += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
+              if (successfulRuns < NUM_RUNS) {
+                commentBody   += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed — quorum still met.\n\n`;
+              }
+              commentBody     += `**${totalFindings} issue(s) found** — `;
+              commentBody     += `🔴 Critical ${groups.Critical.length} | `;
+              commentBody     += `🟠 High ${groups.High.length} | `;
+              commentBody     += `🟡 Medium ${groups.Medium.length} | `;
+              commentBody     += `🔵 Low ${groups.Low.length} | `;
+              commentBody     += `ℹ️ Info ${groups.Info.length}\n\n`;
+
+              if (totalFindings === 0) {
+                commentBody += `> ✅ No security vulnerabilities found in this diff.\n`;
+              } else {
+
+                // ── Single flat table sorted by severity ──
+                commentBody += `| ID | Severity | CVSS Score | Certainty | File | Line | Issue |\n`;
+                commentBody += `|----|----------|------------|-----------|------|------|-------|\n`;
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  commentBody += `| ${f.id} | ${severityEmoji[f.severity]} ${f.severity} | ${f.score ?? 'N/A'} | ${f.certainty} | \`${f.file}\` | ${f.line} | ${f.title} |\n`;
+                }
+                commentBody += `\n---\n\n`;
+
+                // ── All detail blocks in same severity order ──
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  commentBody += `**[${f.id}] ${f.title}**\n`;
+                  commentBody += `- **Severity**: ${severityEmoji[f.severity]} ${f.severity}\n`;
+                  commentBody += `- **CVSS Score**: ${f.score ?? 'N/A'}\n`;
+                  commentBody += `- **Certainty**: ${f.certainty}\n`;
+                  commentBody += `- **CWE**: ${f.cwe}\n`;
+                  commentBody += `- **OWASP**: ${f.owasp}\n`;
+                  commentBody += `- **File**: \`${f.file}\` line ${f.line}\n`;
+                  commentBody += `- **Description**: ${f.description}\n`;
+                  commentBody += `- **Fix**:\n`;
+                  commentBody += `\`\`\`diff\n- ${f.fix_before}\n+ ${f.fix_after}\n\`\`\`\n\n`;
+                }
+              }
+
+              if (wasTruncated) {
+                commentBody += `> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed. Consider splitting this PR.\n`;
+              }
+
+              // ─── Post PR comment ───────────────────────────────────
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+
+              console.log(`\nSecurity review posted on PR #${context.issue.number}`);
+
+              // ═══════════════════════════════════════════════════════
+              // SLACK — full technical details
+              // Everything the PR comment omits goes here
+              // ═══════════════════════════════════════════════════════
+              const slackLines = [
+                totalFindings === 0
+                  ? `✅ *Security Review Complete — No Findings*`
+                  : `🔎 *Security Review Complete — ${totalFindings} Finding(s) Found*`,
+                `> *Repo*: ${repoLabel}`,
+                `> *PR*: <${prLink}|#${context.issue.number}>`,
+                `> *Model*: \`${MODEL}\``,
+                `> *Temperature*: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
+                `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
+                `> *Quorum*: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings in at least ${MIN_RUNS_REQUIRED} runs reported`,
+                `> *Scanned*: ${today}`,
+                `> *Summary*: 🔴 Critical ${groups.Critical.length} | 🟠 High ${groups.High.length} | 🟡 Medium ${groups.Medium.length} | 🔵 Low ${groups.Low.length} | ℹ️ Info ${groups.Info.length}`,
+                `>`,
+                `> *Token Breakdown*`,
+                `> • System prompt : ~${systemPromptTokensEst} tokens/run | ~${systemPromptTokensEst * successfulRuns} tokens total`,
+                `> • Diff          : ~${diffTokensEst} tokens/run | ~${diffTokensEst * successfulRuns} tokens total`,
+                `> • Total input   : ${totalInputTokens} tokens (actual) | est ~${totalInputTokensEst * successfulRuns}`,
+                `> • Total output  : ${totalOutputTokens} tokens (actual) | avg ~${avgOutputPerRun}/run`,
+                `> • Grand total   : ${totalInputTokens + totalOutputTokens} tokens`,
+              ];
+
+              if (totalCacheCreate > 0) slackLines.push(`> • Cache create   : ${totalCacheCreate} tokens`);
+              if (totalCacheRead   > 0) slackLines.push(`> • Cache read     : ${totalCacheRead} tokens`);
+
+              if (totalFindings > 0) {
+                slackLines.push('');
+                slackLines.push('*Findings:*');
+                slackLines.push('```');
+                slackLines.push('ID      | Sev      | Score | Certainty | CWE    | File');
+                slackLines.push('--------|----------|-------|-----------|--------|-----');
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  slackLines.push(
+                    `${f.id.padEnd(7)} | ${f.severity.padEnd(8)} | ${String(f.score ?? 'N/A').padEnd(5)} | ${(f.certainty ?? '').padEnd(9)} | ${(f.cwe ?? '').padEnd(6)} | ${f.file}:${f.line}`
+                  );
+                }
+                slackLines.push('```');
+                slackLines.push('');
+                slackLines.push('*CVSS Vectors & Breakdown:*');
+                slackLines.push('```');
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  slackLines.push(`[${f.id}] ${f.title}`);
+                  slackLines.push(`  Vector : ${f.vector ?? 'N/A'}`);
+                  slackLines.push(`  Source : ${f.usedCanonical ? 'Canonical CWE table' : 'Model-assigned (temp=0)'}`);
+                  if (f.metrics) {
+                    slackLines.push(`  AV:${f.metrics.AV} AC:${f.metrics.AC} PR:${f.metrics.PR} UI:${f.metrics.UI} S:${f.metrics.S} C:${f.metrics.C} I:${f.metrics.I} A:${f.metrics.A}`);
+                  }
+                  slackLines.push('');
+                }
+                slackLines.push('```');
+              }
+
+              if (wasTruncated) {
+                slackLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed.`);
+              }
+
+              await sendSlackAlert(slackLines.join('\n'));
+
+            } catch (error) {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Script Crash*\n` +
+                `> *Repo*: ${repoLabel}\n` +
+                `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                `> *Error*: ${error.message}`
+              );
+              core.setFailed(`Script error: ${error.message}\n${error.stack}`);
+            }
