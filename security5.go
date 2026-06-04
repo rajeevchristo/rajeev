@@ -1,0 +1,1016 @@
+name: Security-Only PR Review (Claude Haiku 4.5)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch and generate diff
+        run: |
+          git fetch origin "${{ github.base_ref }}" || {
+            echo "::error::Failed to fetch base branch ${{ github.base_ref }}"
+            exit 1
+          }
+          git diff --no-color --unified=2 "origin/${{ github.base_ref }}...HEAD" > diff.txt
+          echo "Diff size: $(wc -c < diff.txt) bytes"
+
+      - name: Check Anthropic API access
+        id: quota_check
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sendSlackAlert = async (message) => {
+              const webhookUrl = process.env.SLACK_WEBHOOK;
+              if (!webhookUrl) {
+                console.warn("SLACK_WEBHOOK secret is not set — skipping Slack alert.");
+                return;
+              }
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: message }),
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+              } catch (slackErr) {
+                console.warn(`Slack alert failed: ${slackErr.message}`);
+              }
+            };
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            let response;
+            try {
+              response = await fetch("https://api.anthropic.com/v1/messages", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-api-key": process.env.ANTHROPIC_API_KEY,
+                  "anthropic-version": "2023-06-01"
+                },
+                body: JSON.stringify({
+                  model: "claude-haiku-4-5",
+                  max_tokens: 1,
+                  messages: [{ role: "user", content: "ping" }]
+                }),
+                signal: controller.signal
+              });
+            } catch (fetchErr) {
+              clearTimeout(timeoutId);
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Anthropic API Unreachable*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Network error or timeout during API ping.\n` +
+                `> *Detail*: \`${fetchErr.message}\``
+              );
+              core.setFailed(`Anthropic API unreachable: ${fetchErr.message}`);
+              return;
+            }
+            clearTimeout(timeoutId);
+
+            if (response.ok) {
+              console.log("Anthropic API check passed.");
+              core.setOutput("quota_ok", "true");
+              return;
+            }
+
+            const errorBody = await response.json().catch(() => ({}));
+            const errorType = errorBody?.error?.type ?? "";
+            const errorMsg  = errorBody?.error?.message ?? JSON.stringify(errorBody);
+
+            console.warn(`Anthropic API check failed (HTTP ${response.status}): ${errorMsg}`);
+            core.setOutput("quota_ok", "false");
+
+            if (response.status === 429 || errorType === "rate_limit_error") {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: [
+                  "## Security Review — Skipped ⚠️",
+                  "",
+                  "> **Reason**: Anthropic API rate limit or quota exceeded.",
+                  "> Reported to security team."
+                ].join("\n")
+              });
+              await sendSlackAlert(
+                `⚠️ *Security Review Skipped — Anthropic API Rate Limit / Quota Exceeded*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Anthropic API returned rate limit or quota error.\n` +
+                `> *Action*: Check your Anthropic API plan or rotate the \`ANTHROPIC_API_KEY\` secret.`
+              );
+              core.setFailed("Security review skipped: Anthropic API rate limit or quota exceeded.");
+            } else if (response.status === 401 || errorType === "authentication_error") {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: [
+                  "## Security Review — Skipped ⚠️",
+                  "",
+                  "> **Reason**: Anthropic API key is invalid or missing.",
+                  "> Reported to security team."
+                ].join("\n")
+              });
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Invalid Anthropic API Key*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: API key is invalid or not set.\n` +
+                `> *Action*: Rotate the \`ANTHROPIC_API_KEY\` secret in repository settings.`
+              );
+              core.setFailed("Security review skipped: Anthropic API key invalid.");
+            } else {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Anthropic API Check Error*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: Unexpected error during API check (HTTP ${response.status}).\n` +
+                `> *Detail*: \`${errorMsg}\``
+              );
+              core.setFailed(`Anthropic API check failed with unexpected error (HTTP ${response.status}).`);
+            }
+
+      - name: Run Security-Only Review with Claude Haiku 4.5
+        if: steps.quota_check.outputs.quota_ok == 'true'
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            // ─── CONFIG ────────────────────────────────────────────────
+            const MAX_DIFF_CHARS  = 120000;
+            const MAX_TOKENS      = 8000;
+            const MODEL           = "claude-haiku-4-5";
+            const NUM_RUNS        = 3;
+            const TEMPERATURE     = 0;
+            // A finding must appear in at least MIN_RUNS_REQUIRED out of
+            // NUM_RUNS to be reported. Set to 2 so one failed or divergent
+            // run does not suppress a real vulnerability.
+            const MIN_RUNS_REQUIRED = 2;
+            // ───────────────────────────────────────────────────────────
+
+            // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
+            function computeCVSS31(m) {
+              const AV   = { N: 0.85, A: 0.62, L: 0.55, P: 0.20 }[m.AV];
+              const AC   = { L: 0.77, H: 0.44 }[m.AC];
+              const PR_U = { N: 0.85, L: 0.62, H: 0.27 }[m.PR];
+              const PR_C = { N: 0.85, L: 0.68, H: 0.50 }[m.PR];
+              const UI   = { N: 0.85, R: 0.62 }[m.UI];
+              const S    = m.S;
+              const PR   = S === 'C' ? PR_C : PR_U;
+              const C    = { N: 0.00, L: 0.22, H: 0.56 }[m.C];
+              const I    = { N: 0.00, L: 0.22, H: 0.56 }[m.I];
+              const A    = { N: 0.00, L: 0.22, H: 0.56 }[m.A];
+
+              const ISCBase = 1 - (1 - C) * (1 - I) * (1 - A);
+              const ISC     = S === 'U'
+                ? 6.42 * ISCBase
+                : 7.52 * (ISCBase - 0.029) - 3.25 * Math.pow(ISCBase - 0.02, 15);
+
+              if (ISC <= 0) return 0.0;
+
+              const Exploitability = 8.22 * AV * AC * PR * UI;
+              const raw = S === 'U'
+                ? Math.min(ISC + Exploitability, 10)
+                : Math.min(1.08 * (ISC + Exploitability), 10);
+
+              return Math.ceil(raw * 10) / 10;
+            }
+
+            function getSeverity(score) {
+              if (score >= 9.0) return 'Critical';
+              if (score >= 7.0) return 'High';
+              if (score >= 4.0) return 'Medium';
+              if (score >  0.0) return 'Low';
+              return 'Info';
+            }
+
+            function getVector(m) {
+              return `CVSS:3.1/AV:${m.AV}/AC:${m.AC}/PR:${m.PR}/UI:${m.UI}/S:${m.S}/C:${m.C}/I:${m.I}/A:${m.A}`;
+            }
+
+            // ─── CWE CANONICAL VECTOR LOOKUP TABLE ────────────────────
+            const CWE_VECTORS = {
+              'CWE-89':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-77':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-78':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-917': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-94':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-611': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-79':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' },
+              'CWE-80':  { AV:'N', AC:'L', PR:'N', UI:'R', S:'C', C:'L', I:'L', A:'N' },
+              'CWE-918': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-352': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-287': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-306': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-639': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-862': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-863': { AV:'N', AC:'L', PR:'L', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-798': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-259': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-321': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-326': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-327': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-330': { AV:'N', AC:'H', PR:'N', UI:'N', S:'U', C:'H', I:'N', A:'N' },
+              'CWE-22':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'N' },
+              'CWE-434': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-601': { AV:'N', AC:'L', PR:'N', UI:'R', S:'U', C:'L', I:'L', A:'N' },
+              'CWE-502': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'H', I:'H', A:'H' },
+              'CWE-20':  { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'L', A:'N' },
+              'CWE-200': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' },
+              'CWE-209': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'L', I:'N', A:'N' },
+              'CWE-400': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' },
+              'CWE-770': { AV:'N', AC:'L', PR:'N', UI:'N', S:'U', C:'N', I:'N', A:'H' },
+            };
+
+            // ─── SLACK ALERT HELPER ────────────────────────────────────
+            const sendSlackAlert = async (message) => {
+              const webhookUrl = process.env.SLACK_WEBHOOK;
+              if (!webhookUrl) {
+                console.warn("SLACK_WEBHOOK secret is not set — skipping Slack alert.");
+                return;
+              }
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                await fetch(webhookUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ text: message }),
+                  signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+              } catch (slackErr) {
+                console.warn(`Slack alert failed: ${slackErr.message}`);
+              }
+            };
+
+            // ─── READ DIFF ─────────────────────────────────────────────
+            let rawDiff;
+            try {
+              rawDiff = fs.readFileSync('diff.txt', 'utf8');
+            } catch (readErr) {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Could Not Read Diff*\n` +
+                `> *Repo*: ${context.repo.owner}/${context.repo.repo}\n` +
+                `> *PR*: #${context.issue.number}\n` +
+                `> *Reason*: diff.txt missing or unreadable: ${readErr.message}`
+              );
+              core.setFailed(`Could not read diff.txt: ${readErr.message}`);
+              return;
+            }
+
+            const prLink    = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`;
+            const repoLabel = `${context.repo.owner}/${context.repo.repo}`;
+
+            const wasTruncated  = rawDiff.length > MAX_DIFF_CHARS;
+            const truncatedDiff = wasTruncated
+              ? rawDiff.slice(0, MAX_DIFF_CHARS) + '\n\n[... diff truncated due to size ...]'
+              : rawDiff;
+
+            if (!truncatedDiff.trim()) {
+              console.log('No diff found. Skipping security review.');
+              return;
+            }
+
+            console.log(`Raw diff size  : ${rawDiff.length} chars`);
+            console.log(`Sent to model  : ${truncatedDiff.length} chars`);
+            console.log(`Input  tokens (approx): ~${Math.round(truncatedDiff.length / 4)}`);
+            console.log(`Output tokens (max):     ${MAX_TOKENS}`);
+            console.log(`Temperature    : ${TEMPERATURE} (all runs)`);
+            console.log(`Min runs required: ${MIN_RUNS_REQUIRED}/${NUM_RUNS}`);
+            if (wasTruncated) console.log('WARNING: Diff was truncated — some changes were NOT reviewed!');
+
+            const today = new Date().toISOString().split('T')[0];
+
+            const systemPrompt = [
+              "You are a senior application security engineer performing a thorough code security audit.",
+              "Your ONLY job is to find real security vulnerabilities in the diff provided.",
+              "",
+              "DO NOT compute CVSS scores. DO NOT assign severity labels.",
+              "Scores and severity are computed deterministically by the calling system.",
+              "Your job is ONLY to find vulnerabilities and select the 8 CVSS metric letters.",
+              "",
+              "OUTPUT: Respond with ONLY a valid raw JSON object. No markdown, no backticks, no explanation.",
+              "",
+              "================================================================",
+              "STEP 1 — MAP ALL USER INPUT SOURCES",
+              "================================================================",
+              "",
+              "Before looking for vulnerabilities, identify every source of",
+              "user-controlled input in the ADDED lines:",
+              "",
+              "  - HTTP params      — req.params, req.query, request.GET, request.POST",
+              "  - Request body     — req.body, request.json(), request.form",
+              "  - Headers          — req.headers, request.META, request.headers",
+              "  - File uploads     — req.file, request.FILES, multipart data",
+              "  - URL path params  — path parameters, route variables",
+              "  - Query strings    — anything parsed from the URL",
+              "  - External data    — values read from DB that originally came from users",
+              "  - Message queues   — payloads consumed from external queues or events",
+              "  - Environment vars — if populated from external/untrusted sources",
+              "",
+              "Note every input source before moving to Step 2.",
+              "",
+              "================================================================",
+              "STEP 2 — TRACE EVERY INPUT TO ITS SINK",
+              "================================================================",
+              "",
+              "For each input source found in Step 1, trace where it flows.",
+              "If it reaches any of these dangerous sinks — flag it:",
+              "",
+              "  SINK                  DANGEROUS IF UNSANITIZED",
+              "  Database query        db.query(), execute(), raw(), string concat in SQL",
+              "  Shell command         exec(), spawn(), system(), popen(), subprocess",
+              "  File path             fs.readFile(), open(), path.join() with user input",
+              "  HTML output           innerHTML, dangerouslySetInnerHTML, res.send(html)",
+              "  Redirect target       res.redirect(), header Location, sendRedirect()",
+              "  Outbound HTTP URL     fetch(url), axios.get(url), requests.get(url)",
+              "  Eval / code exec      eval(), new Function(), compile(), importlib",
+              "  Log statement         console.log(), logger.info() with sensitive values",
+              "  Deserializer          pickle.loads(), unserialize(), yaml.load()",
+              "  Template engine       render(), Jinja2, Handlebars with user input",
+              "",
+              "================================================================",
+              "STEP 3 — INJECTION CHECKLIST",
+              "================================================================",
+              "",
+              "For every ADDED line, work through each item:",
+              "",
+              "[ ] SQL Injection (CWE-89)",
+              "    Is user input concatenated or interpolated into a SQL string?",
+              "    UNSAFE : 'SELECT * FROM users WHERE id = ' + userId",
+              "    UNSAFE : SELECT * FROM users WHERE id = ${userId}",
+              "    SAFE   : parameterized queries, prepared statements, ORM bound params",
+              "",
+              "[ ] Command Injection (CWE-78)",
+              "    Is user input passed to a shell execution function?",
+              "    UNSAFE : exec('convert ' + filename), os.system(userInput)",
+              "    SAFE   : execFile() with array args, subprocess with list not string",
+              "",
+              "[ ] Code Injection (CWE-94)",
+              "    Is user input passed to eval() or dynamic code execution?",
+              "    UNSAFE : eval(userInput), new Function(userInput), exec(userCode)",
+              "",
+              "[ ] Template Injection (CWE-1336)",
+              "    Is user input rendered inside a server-side template string?",
+              "    UNSAFE : template.render(userInput), Jinja2 env.from_string(userInput)",
+              "",
+              "[ ] XXE — XML External Entity (CWE-611)",
+              "    Is XML being parsed? Are external entities explicitly disabled?",
+              "    UNSAFE : default XML parser config that allows DOCTYPE declarations",
+              "",
+              "[ ] Log Injection (CWE-117)",
+              "    Is unsanitized user input written directly to log files?",
+              "    UNSAFE : logger.info('Request from: ' + userInput)",
+              "",
+              "[ ] LDAP Injection (CWE-90)",
+              "    Is user input used inside an LDAP search filter without escaping?",
+              "",
+              "[ ] XPath Injection (CWE-643)",
+              "    Is user input concatenated into an XPath expression?",
+              "",
+              "================================================================",
+              "STEP 4 — AUTHENTICATION AND ACCESS CONTROL CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Missing Authentication (CWE-306)",
+              "    Does this new endpoint or function require a login check?",
+              "    Is there an auth middleware or guard applied before it executes?",
+              "    Can it be reached without a valid session or token?",
+              "",
+              "[ ] Missing Authorization (CWE-862)",
+              "    After authentication — does it check if the user is ALLOWED?",
+              "    Can user A read or modify user B's data by changing an ID?",
+              "",
+              "[ ] IDOR — Insecure Direct Object Reference (CWE-639)",
+              "    Is a resource fetched using a user-supplied ID without ownership check?",
+              "    UNSAFE : db.find({ id: req.params.id }) with no ownership check",
+              "",
+              "[ ] Privilege Escalation (CWE-269)",
+              "    Can a regular user trigger admin-only operations?",
+              "    Is the role/permission checked server-side or only client-side?",
+              "",
+              "[ ] JWT Issues (CWE-347)",
+              "    Is the JWT signature verified before trusting its claims?",
+              "    Is the algorithm explicitly enforced, not taken from the token header?",
+              "    Could alg:none or algorithm confusion be exploited?",
+              "",
+              "[ ] Session Fixation (CWE-384)",
+              "    Is the session ID rotated after a successful login?",
+              "",
+              "[ ] Mass Assignment (CWE-915)",
+              "    Is req.body or a similar object spread directly onto a model?",
+              "    UNSAFE : User.update(req.body) — attacker can set role or isAdmin",
+              "",
+              "[ ] Broken Access Control (CWE-284)",
+              "    Are role checks present and enforced for every sensitive operation?",
+              "",
+              "================================================================",
+              "STEP 5 — SECRETS AND CRYPTOGRAPHY CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Hardcoded Credentials (CWE-798)",
+              "    Scan every string literal in ADDED lines.",
+              "    Flag any string that looks like:",
+              "      - API key, secret key, auth token, private key, bearer token",
+              "      - Database connection string containing a password",
+              "      - Variable named: secret, password, token, key, apiKey, credentials",
+              "      - Known prefixes: sk-, pk-, ghp_, ghs_, AKIA, SG., xox, rk_live_",
+              "      - Long random-looking alphanumeric strings (32+ chars) in assignments",
+              "      - Default parameter values that look like real secrets:",
+              "        os.getenv('KEY', 'fallback-hardcoded-value')",
+              "      - Base64 or hex encoded strings assigned to credential variables",
+              "      - Secrets inside comments: // password is Admin123",
+              "      - Secrets in config objects: { host: 'db', pass: 'abc123' }",
+              "",
+              "[ ] Hardcoded Crypto Key (CWE-321)",
+              "    Is an encryption key, IV, or salt hardcoded as a string literal?",
+              "",
+              "[ ] Weak Hashing Algorithm (CWE-327)",
+              "    Is MD5 or SHA1 used for passwords or any security-sensitive data?",
+              "    SAFE   : bcrypt, argon2, scrypt, PBKDF2",
+              "    UNSAFE : md5(password), sha1(password), hashlib.md5(password)",
+              "",
+              "[ ] Insecure Random (CWE-330)",
+              "    Is Math.random() or rand() used for security tokens, session IDs,",
+              "    password reset codes, OTPs, or nonces?",
+              "    SAFE   : crypto.randomBytes(), secrets.token_hex(), os.urandom()",
+              "",
+              "[ ] Weak Cipher (CWE-326)",
+              "    Is DES, 3DES, RC4, Blowfish, or AES in ECB mode used?",
+              "    SAFE   : AES-256-GCM, AES-256-CBC with random IV, ChaCha20-Poly1305",
+              "",
+              "[ ] Missing Encryption (CWE-311)",
+              "    Is sensitive data (PII, passwords, tokens) stored or transmitted",
+              "    without encryption?",
+              "",
+              "================================================================",
+              "STEP 6 — INPUT HANDLING AND REQUEST FORGERY CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] XSS — Cross-Site Scripting (CWE-79)",
+              "    Is user input rendered in HTML without proper escaping?",
+              "    UNSAFE : element.innerHTML = userInput",
+              "    UNSAFE : dangerouslySetInnerHTML with user input",
+              "    UNSAFE : res.send('<div>' + userInput + '</div>')",
+              "",
+              "[ ] SSRF — Server-Side Request Forgery (CWE-918)",
+              "    Is a user-controlled value used as the URL in an outbound HTTP request?",
+              "    UNSAFE : fetch(req.body.url), requests.get(userInput)",
+              "",
+              "[ ] Open Redirect (CWE-601)",
+              "    Is a user-controlled value used as a redirect destination?",
+              "    UNSAFE : res.redirect(req.query.next), sendRedirect(userInput)",
+              "",
+              "[ ] Path Traversal (CWE-22)",
+              "    Is user input used in a file path without sanitization?",
+              "    UNSAFE : fs.readFile('./uploads/' + userInput)",
+              "    UNSAFE : open(base_dir + user_filename)",
+              "    SAFE   : path.basename() to strip directory components, allowlist",
+              "",
+              "[ ] Unrestricted File Upload (CWE-434)",
+              "    Is file type validated by content (magic bytes), not just extension?",
+              "    Is file size limited? Is file stored outside the web root?",
+              "",
+              "[ ] CSRF — Cross-Site Request Forgery (CWE-352)",
+              "    Do state-changing endpoints (POST/PUT/PATCH/DELETE) verify a CSRF token?",
+              "",
+              "[ ] HTTP Header Injection (CWE-113)",
+              "    Is user input written into HTTP response headers without validation?",
+              "    UNSAFE : res.setHeader('Location', userInput)",
+              "",
+              "[ ] Prototype Pollution (CWE-1321)",
+              "    Is user input merged into a plain object without filtering __proto__?",
+              "    UNSAFE : Object.assign(target, userInput), _.merge(obj, userInput)",
+              "",
+              "================================================================",
+              "STEP 7 — DATA EXPOSURE AND MISCONFIGURATION CHECKLIST",
+              "================================================================",
+              "",
+              "[ ] Sensitive Data in Logs (CWE-532)",
+              "    Are passwords, tokens, PII, card numbers, or secrets written to logs?",
+              "    UNSAFE : console.log('Login:', { email, password })",
+              "    UNSAFE : logger.debug('Token: ' + authToken)",
+              "",
+              "[ ] Stack Trace Exposed to Client (CWE-209)",
+              "    Are raw error objects, stack traces, or internal paths returned",
+              "    in API responses visible to the caller?",
+              "    UNSAFE : res.json({ error: err.stack })",
+              "",
+              "[ ] Debug Mode Enabled (CWE-215)",
+              "    Are debug flags, verbose error modes, or development settings",
+              "    left enabled in code that could reach production?",
+              "    UNSAFE : app.use(errorHandler({ dumpExceptions: true }))",
+              "    UNSAFE : DEBUG = True in a non-development config",
+              "",
+              "[ ] Insecure Deserialization (CWE-502)",
+              "    Is untrusted data passed to a deserializer?",
+              "    UNSAFE : pickle.loads(userInput), unserialize(userInput)",
+              "    UNSAFE : yaml.load(data) without Loader=yaml.SafeLoader",
+              "",
+              "[ ] Dependency Confusion (CWE-427)",
+              "    Are new internal package names added that could be typosquatted",
+              "    or registered on public registries (npm, PyPI)?",
+              "",
+              "[ ] Insecure Direct Storage (CWE-313)",
+              "    Is sensitive data written to disk without encryption?",
+              "",
+              "[ ] Race Condition / TOCTOU (CWE-362)",
+              "    Is shared state modified without locks?",
+              "    Is a check-then-use pattern present where state can change between?",
+              "",
+              "================================================================",
+              "CVSS METRIC SELECTION RULES",
+              "================================================================",
+              "",
+              "AV (Attack Vector)",
+              "  N = Exploitable remotely over the internet",
+              "  A = Requires same local network or Bluetooth",
+              "  L = Requires local OS user account on the machine",
+              "  P = Requires physical hardware access",
+              "",
+              "AC (Attack Complexity)",
+              "  L = No special conditions or prerequisites required",
+              "  H = Requires race condition, specific config, or hard-to-reproduce state",
+              "",
+              "PR (Privileges Required)",
+              "  N = No login or account needed to exploit",
+              "  L = Regular authenticated user account needed",
+              "  H = Administrator or privileged account needed",
+              "",
+              "UI (User Interaction)",
+              "  N = Attacker can exploit with no victim action needed",
+              "  R = A victim must click, open, or interact",
+              "",
+              "S (Scope)",
+              "  U = Impact stays within the vulnerable component only",
+              "  C = Impact can reach other components or systems",
+              "",
+              "C (Confidentiality Impact)",
+              "  H = Total loss — attacker can read all data",
+              "  L = Partial loss — some data exposed",
+              "  N = No confidentiality impact",
+              "",
+              "I (Integrity Impact)",
+              "  H = Total loss — attacker can modify any data",
+              "  L = Partial loss — some data can be modified",
+              "  N = No integrity impact",
+              "",
+              "A (Availability Impact)",
+              "  H = Total loss — service can be completely shut down",
+              "  L = Reduced performance or intermittent outages",
+              "  N = No availability impact",
+              "",
+              "CERTAINTY",
+              "  Confirmed — Vulnerable line(s) directly visible in diff, no ambiguity",
+              "  Likely    — Strong risk pattern, full exploit depends on calling context",
+              "  Possible  — Suspicious pattern, requires assumptions outside the diff",
+              "  Unlikely  — Theoretical edge-case, low confidence",
+              "",
+              "================================================================",
+              "OUTPUT FORMAT — RETURN THIS EXACT JSON STRUCTURE",
+              "================================================================",
+              "",
+              "{",
+              '  "findings": [',
+              "    {",
+              '      "title": "Short vulnerability title max 10 words",',
+              '      "file": "path/to/file.ext",',
+              '      "line": 42,',
+              '      "cwe": "CWE-89",',
+              '      "owasp": "A03:2021",',
+              '      "description": "What the vulnerability is and why it is dangerous.",',
+              '      "fix_before": "the insecure line of code",',
+              '      "fix_after": "the secure replacement",',
+              '      "certainty": "Confirmed|Likely|Possible|Unlikely",',
+              '      "metrics": {',
+              '        "AV": "N|A|L|P",',
+              '        "AC": "L|H",',
+              '        "PR": "N|L|H",',
+              '        "UI": "N|R",',
+              '        "S":  "U|C",',
+              '        "C":  "N|L|H",',
+              '        "I":  "N|L|H",',
+              '        "A":  "N|L|H"',
+              "      }",
+              "    }",
+              "  ]",
+              "}",
+              "",
+              "STRICT RULES:",
+              "- Output ONLY the raw JSON object. No markdown. No backticks. No explanation.",
+              "- Report ONLY real security vulnerabilities. Never comment on style or performance.",
+              "- Every metrics object MUST have all 8 keys with values from the allowed set.",
+              "- If no vulnerabilities found return: { \"findings\": [] }",
+              "- Do NOT compute CVSS scores. Do NOT assign severity labels."
+            ].join("\n");
+
+            const userPrompt =
+              "Analyze the diff below for security vulnerabilities.\n" +
+              "Follow the checklist in the system prompt internally.\n" +
+              "Do NOT write any explanation, thinking, or text before the JSON.\n" +
+              "Your entire response must be a single raw JSON object starting with { and ending with }.\n" +
+              "First character of your response must be { and nothing else.\n\n" +
+              "Diff to analyze:\n" +
+              truncatedDiff;
+
+            try {
+
+              // ─── HELPER: single Claude API call ───────────────────
+              const callClaude = async (runIndex) => {
+                console.log(`Run ${runIndex + 1}/${NUM_RUNS} — calling Claude Haiku 4.5 (temperature: ${TEMPERATURE})...`);
+
+                const controller = new AbortController();
+                const timeoutId  = setTimeout(() => controller.abort(), 120000);
+                let response;
+                try {
+                  response = await fetch("https://api.anthropic.com/v1/messages", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "x-api-key": process.env.ANTHROPIC_API_KEY,
+                      "anthropic-version": "2023-06-01"
+                    },
+                    body: JSON.stringify({
+                      model: MODEL,
+                      max_tokens: MAX_TOKENS,
+                      temperature: TEMPERATURE,
+                      system: systemPrompt,
+                      messages: [{ role: "user", content: userPrompt }]
+                    }),
+                    signal: controller.signal
+                  });
+                } finally {
+                  clearTimeout(timeoutId);
+                }
+
+                if (!response.ok) {
+                  const errorBody = await response.json().catch(() => ({}));
+                  const errorType = errorBody?.error?.type ?? "";
+                  const errorMsg  = errorBody?.error?.message ?? JSON.stringify(errorBody);
+                  return { error: true, status: response.status, errorType, errorMsg, findings: [], usage: {} };
+                }
+
+                const data    = await response.json();
+                const rawText = (data?.content ?? [])
+                  .filter(b => b.type === "text")
+                  .map(b => b.text)
+                  .join("\n")
+                  .trim();
+
+                const usage = data.usage || {};
+                console.log(`  Run ${runIndex + 1} tokens — input: ${usage.input_tokens ?? 'N/A'} output: ${usage.output_tokens ?? 'N/A'}`);
+
+                if (!rawText) {
+                  console.warn(`  Run ${runIndex + 1} returned empty response — skipping.`);
+                  return { error: false, findings: [], usage };
+                }
+
+                try {
+                  let cleaned = rawText
+                    .replace(/^```(?:json)?\s*/i, '')
+                    .replace(/\s*```$/, '')
+                    .trim();
+                  const firstBrace = cleaned.indexOf('{');
+                  const lastBrace  = cleaned.lastIndexOf('}');
+                  if (firstBrace === -1 || lastBrace === -1) {
+                    console.warn(`  Run ${runIndex + 1} — no JSON object found in response.`);
+                    return { error: false, findings: [], usage };
+                  }
+                  if (firstBrace > 0) {
+                    console.warn(`  Run ${runIndex + 1} — model output ${firstBrace} chars before JSON, extracted block only.`);
+                  }
+                  cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+                  const parsed = JSON.parse(cleaned);
+                  const findings = Array.isArray(parsed?.findings) ? parsed.findings : [];
+                  console.log(`  Run ${runIndex + 1} — ${findings.length} finding(s) parsed.`);
+                  return { error: false, findings, usage };
+                } catch (parseErr) {
+                  console.warn(`  Run ${runIndex + 1} JSON parse failed: ${parseErr.message}`);
+                  return { error: false, findings: [], usage };
+                }
+              };
+
+              // ─── QUORUM DEDUPLICATION ──────────────────────────────
+              // A finding is reported if it appears in at least
+              // MIN_RUNS_REQUIRED out of NUM_RUNS runs (2 out of 3).
+              //
+              // WHY 2/3 INSTEAD OF 3/3:
+              //   - If one run fails (API glitch, parse error, empty
+              //     response), a real vulnerability is not silently lost
+              //   - A finding seen in 2/3 identical temperature-0 runs
+              //     is still highly consistent — not a random artifact
+              //   - Protects against transient infrastructure failures
+              //     without sacrificing signal quality
+              //
+              // The line grouping (±5 lines) handles minor line number
+              // drift for the same underlying issue across runs.
+              // When duplicates exist, the highest certainty version
+              // is kept for the final report.
+              const deduplicateFindings = (allFindings, successfulRuns) => {
+                const certaintyRank = { Confirmed: 4, Likely: 3, Possible: 2, Unlikely: 1 };
+
+                // Dynamic threshold — if only 2 runs succeeded, require
+                // both; if all 3 succeeded, require at least 2
+                const threshold = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
+                console.log(`  Dedup threshold: ${threshold}/${successfulRuns} successful runs`);
+
+                const seen = new Map();
+
+                for (const f of allFindings) {
+                  const lineGroup = Math.floor((f.line ?? 0) / 5) * 5;
+                  const key = ((f.cwe ?? 'UNKNOWN') + '::' + (f.file ?? '') + '::' + lineGroup).toUpperCase();
+
+                  if (!seen.has(key)) {
+                    seen.set(key, { finding: f, count: 1 });
+                  } else {
+                    const existing = seen.get(key);
+                    existing.count += 1;
+                    // Keep highest certainty version across runs
+                    const newRank = certaintyRank[f.certainty] ?? 0;
+                    const oldRank = certaintyRank[existing.finding.certainty] ?? 0;
+                    if (newRank > oldRank) existing.finding = f;
+                  }
+                }
+
+                // ── QUORUM FILTER ──
+                // Keep findings seen in at least `threshold` runs
+                return Array.from(seen.values())
+                  .filter(entry => entry.count >= threshold)
+                  .map(entry => entry.finding);
+              };
+
+              // ─── THREE INDEPENDENT RUNS ────────────────────────────
+              const allRawFindings = [];
+              let totalInputTokens  = 0;
+              let totalOutputTokens = 0;
+              let successfulRuns    = 0;
+              let hardFailure       = null;
+
+              for (let i = 0; i < NUM_RUNS; i++) {
+                const result = await callClaude(i);
+
+                if (result.error) {
+                  if (result.status === 429 || result.errorType === "rate_limit_error") {
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: context.issue.number,
+                      body: "## Security Review — Skipped ⚠️\n\n> **Reason**: Anthropic API rate limit exceeded during scan."
+                    });
+                    await sendSlackAlert(
+                      `⚠️ *Security Review Skipped — Rate Limit*\n` +
+                      `> *Repo*: ${repoLabel}\n> *PR*: <${prLink}|#${context.issue.number}>`
+                    );
+                    core.setFailed("Security review skipped: rate limit.");
+                    return;
+                  }
+                  console.warn(`Run ${i + 1} failed (HTTP ${result.status}): ${result.errorMsg} — continuing with other runs.`);
+                  hardFailure = result.errorMsg;
+                  continue;
+                }
+
+                // Only count a run as successful if it returned
+                // a parseable response (even if zero findings)
+                successfulRuns += 1;
+                allRawFindings.push(...result.findings);
+                totalInputTokens  += result.usage.input_tokens  ?? 0;
+                totalOutputTokens += result.usage.output_tokens ?? 0;
+              }
+
+              // ─── ABORT if fewer than MIN_RUNS_REQUIRED succeeded ───
+              // If only 0 or 1 run succeeded we cannot apply a meaningful
+              // quorum filter — abort rather than report unreliable data
+              if (successfulRuns < MIN_RUNS_REQUIRED) {
+                const reason = successfulRuns === 0
+                  ? 'All API calls failed.'
+                  : `Only ${successfulRuns}/${NUM_RUNS} runs succeeded — minimum required is ${MIN_RUNS_REQUIRED}.`;
+                await sendSlackAlert(
+                  `🔴 *Security Review Failed — Insufficient Successful Runs*\n` +
+                  `> *Repo*: ${repoLabel}\n> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                  `> *Reason*: ${reason}\n` +
+                  `> *Detail*: ${hardFailure ?? 'Unknown error'}`
+                );
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: [
+                    "## Security Review — Failed ⚠️",
+                    "",
+                    `> **Reason**: ${reason}`,
+                    "> Reported to security team."
+                  ].join("\n")
+                });
+                core.setFailed(`Security review aborted: ${reason}`);
+                return;
+              }
+
+              console.log(`─── Multi-Run Summary ─────────────────────`);
+              console.log(`  Temperature                        : ${TEMPERATURE} (all runs)`);
+              console.log(`  Successful runs                    : ${successfulRuns}/${NUM_RUNS}`);
+              console.log(`  Total raw findings (before dedup)  : ${allRawFindings.length}`);
+              const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
+              console.log(`  After quorum filter (>=${MIN_RUNS_REQUIRED}/${NUM_RUNS})       : ${dedupedFindings.length}`);
+              console.log(`  Total input  tokens                : ${totalInputTokens}`);
+              console.log(`  Total output tokens                : ${totalOutputTokens}`);
+              console.log(`───────────────────────────────────────────`);
+
+              const rawFindings = dedupedFindings;
+
+              // ─── DETERMINISTIC SCORING ─────────────────────────────
+              const findings = rawFindings.map((f, idx) => {
+                const cweKey           = (f.cwe ?? '').toUpperCase().replace(/\s/g, '');
+                const canonicalMetrics = CWE_VECTORS[cweKey];
+                const metrics          = canonicalMetrics ?? f.metrics;
+                const usedCanonical    = !!canonicalMetrics;
+
+                const validAV = ['N','A','L','P'];
+                const validAC = ['L','H'];
+                const validPR = ['N','L','H'];
+                const validUI = ['N','R'];
+                const validS  = ['U','C'];
+                const validCI = ['N','L','H'];
+
+                const isValid =
+                  metrics &&
+                  validAV.includes(metrics.AV) &&
+                  validAC.includes(metrics.AC) &&
+                  validPR.includes(metrics.PR) &&
+                  validUI.includes(metrics.UI) &&
+                  validS.includes(metrics.S)   &&
+                  validCI.includes(metrics.C)  &&
+                  validCI.includes(metrics.I)  &&
+                  validCI.includes(metrics.A);
+
+                if (!isValid) {
+                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid or missing metrics — skipping CVSS scoring.`);
+                  return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', usedCanonical };
+                }
+
+                const score    = computeCVSS31(metrics);
+                const severity = getSeverity(score);
+                const vector   = getVector(metrics);
+
+                console.log(`Finding ${idx + 1}: "${f.title}" | CWE: ${f.cwe} | Vector: ${vector} | Score: ${score} | Severity: ${severity}${usedCanonical ? ' [canonical]' : ' [model metrics]'}`);
+
+                return { ...f, metrics, score, severity, vector, usedCanonical };
+              });
+
+              // ─── Group by severity ─────────────────────────────────
+              const groups = { Critical: [], High: [], Medium: [], Low: [], Info: [], Unknown: [] };
+              for (const f of findings) {
+                (groups[f.severity] ?? groups.Unknown).push(f);
+              }
+
+              const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
+
+              // ─── Build PR comment ──────────────────────────────────
+              const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info'];
+              const severityEmoji = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
+              const prefixMap     = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
+
+              let commentBody = `## Security Review\n\n`;
+              commentBody    += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
+              if (successfulRuns < NUM_RUNS) {
+                commentBody  += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed successfully — one run failed but quorum was still met.\n\n`;
+              }
+              commentBody    += `**Summary**: ${totalFindings} issue(s) found — `;
+              commentBody    += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
+              commentBody    += `> 🔒 CVSS v3.1 scores computed deterministically from vector metrics by the CI system — not by the AI model.\n\n`;
+              commentBody    += `> 🔁 Only findings confirmed in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} independent scans are reported.\n\n`;
+              commentBody    += `---\n\n`;
+
+              for (const sev of severityOrder) {
+                const group = groups[sev];
+                if (!group || group.length === 0) continue;
+
+                commentBody += `### ${severityEmoji[sev]} ${sev} Issues\n\n`;
+                commentBody += `| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n`;
+                commentBody += `|----------|------------|-------------|-----------|------|------|-------|\n`;
+                for (const f of group) {
+                  commentBody += `| ${sev} | ${f.score} | \`${f.vector}\` | ${f.certainty} | \`${f.file}\` | ${f.line} | ${f.title} |\n`;
+                }
+                commentBody += `\n`;
+
+                const prefix = prefixMap[sev];
+                group.forEach((f, i) => {
+                  const id = `${prefix}-${i + 1}`;
+                  commentBody += `**[${id}] ${f.title}**\n`;
+                  commentBody += `- **Severity**: ${sev}\n`;
+                  commentBody += `- **CVSS Base Score**: ${f.score}\n`;
+                  commentBody += `- **CVSS Vector**: \`${f.vector}\`\n`;
+                  commentBody += `- **CVSS Breakdown**:\n`;
+                  commentBody += `  - AV: ${f.metrics.AV} | AC: ${f.metrics.AC} | PR: ${f.metrics.PR} | UI: ${f.metrics.UI}\n`;
+                  commentBody += `  - S: ${f.metrics.S} | C: ${f.metrics.C} | I: ${f.metrics.I} | A: ${f.metrics.A}\n`;
+                  if (f.usedCanonical) {
+                    commentBody += `- **Vector Source**: Canonical CWE lookup table (deterministic)\n`;
+                  } else {
+                    commentBody += `- **Vector Source**: Model-assigned metrics (temperature=0)\n`;
+                  }
+                  commentBody += `- **Certainty**: ${f.certainty}\n`;
+                  commentBody += `- **CWE**: ${f.cwe}\n`;
+                  commentBody += `- **OWASP**: ${f.owasp}\n`;
+                  commentBody += `- **Description**: ${f.description}\n`;
+                  commentBody += `- **Fix**:\n`;
+                  commentBody += `\`\`\`diff\n- ${f.fix_before}\n+ ${f.fix_after}\n\`\`\`\n\n`;
+                });
+
+                commentBody += `---\n\n`;
+              }
+
+              // ─── Footer ────────────────────────────────────────────
+              const footerLines = [
+                `> 🤖 **Model**: \`${MODEL}\``,
+                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all runs)`,
+                `> ✅ **Successful Runs**: ${successfulRuns}/${NUM_RUNS}`,
+                `> 📊 **Tokens** — Input: \`${totalInputTokens}\` | Output: \`${totalOutputTokens}\` (across ${successfulRuns} successful runs)`,
+                `> 📅 **Scanned**: ${today}`,
+                `> 🔁 **Quorum**: findings present in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs are reported`,
+                `> 🔢 **Scoring**: CVSS v3.1 Base Score computed by CI system from vector metrics. Model outputs metric letters only — never scores or severity labels.`,
+              ];
+              if (wasTruncated) {
+                footerLines.push(`> ⚠️ **Warning**: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+              }
+              commentBody += footerLines.join('\n') + '\n';
+
+              // ─── Post PR comment ───────────────────────────────────
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+
+              console.log(`Security review posted successfully on PR #${context.issue.number}`);
+
+              // ─── Slack summary ─────────────────────────────────────
+              const summaryLines = [
+                totalFindings === 0
+                  ? `✅ *Security Review Complete — No Findings*`
+                  : `🔎 *Security Review Complete — ${totalFindings} Finding(s) Found*`,
+                `> *Repo*: ${repoLabel}`,
+                `> *PR*: <${prLink}|#${context.issue.number}>`,
+                `> *Model*: \`${MODEL}\``,
+                `> *Temperature*: \`${TEMPERATURE}\` (all runs)`,
+                `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
+                `> *Scanned*: ${today}`,
+                `> *Summary*: Critical: ${groups.Critical.length} | High: ${groups.High.length} | Medium: ${groups.Medium.length} | Low: ${groups.Low.length} | Info: ${groups.Info.length}`,
+                `> *Filter*: Quorum — findings seen in at least ${MIN_RUNS_REQUIRED}/${NUM_RUNS} runs reported`,
+              ];
+
+              if (successfulRuns < NUM_RUNS) {
+                summaryLines.push(`> ⚠️ *Note*: ${NUM_RUNS - successfulRuns} run(s) failed — quorum still met with ${successfulRuns} successful runs`);
+              }
+
+              if (totalFindings > 0) {
+                summaryLines.push('');
+                summaryLines.push('*Findings:*');
+                summaryLines.push('```');
+                summaryLines.push('Severity   | Score | Finding');
+                summaryLines.push('-----------|-------|' + '-'.repeat(40));
+                for (const sev of severityOrder) {
+                  for (const f of (groups[sev] ?? [])) {
+                    summaryLines.push(`${sev.padEnd(10)} | ${String(f.score).padEnd(5)} | ${f.title}`);
+                  }
+                }
+                summaryLines.push('```');
+              }
+
+              if (wasTruncated) {
+                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed. Consider splitting this PR.`);
+              }
+
+              await sendSlackAlert(summaryLines.join('\n'));
+
+            } catch (error) {
+              await sendSlackAlert(
+                `🔴 *Security Review Failed — Script Crash*\n` +
+                `> *Repo*: ${repoLabel}\n` +
+                `> *PR*: <${prLink}|#${context.issue.number}>\n` +
+                `> *Error*: ${error.message}`
+              );
+              core.setFailed(`Script error: ${error.message}\n${error.stack}`);
+            }
