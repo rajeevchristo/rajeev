@@ -160,23 +160,11 @@ jobs:
 
             // ─── CONFIG ────────────────────────────────────────────────
             const MAX_DIFF_CHARS    = 120000;
+            const MAX_TOKENS        = 8000;
             const MODEL             = "claude-haiku-4-5";
             const NUM_RUNS          = 5;
+            const TEMPERATURE       = 0;
             const MIN_RUNS_REQUIRED = 3;
-            // Extended thinking config
-            // BUDGET_TOKENS: how many tokens Haiku can use for internal
-            // reasoning before producing output. Higher = more thorough
-            // but slower and more expensive. 8000 is a good balance for
-            // security auditing — enough to reason through all 7 steps
-            // of the checklist systematically across a full diff.
-            const BUDGET_TOKENS     = 8000;
-            // MAX_TOKENS must be greater than BUDGET_TOKENS.
-            // actual output tokens available = MAX_TOKENS - BUDGET_TOKENS
-            // 16000 - 8000 = 8000 output tokens for findings JSON
-            const MAX_TOKENS        = 16000;
-            // NOTE: extended thinking requires temperature 1
-            // temperature 0 is not supported with thinking mode
-            const TEMPERATURE       = 1;
             // ───────────────────────────────────────────────────────────
 
             // ─── CVSS v3.1 DETERMINISTIC CALCULATOR ───────────────────
@@ -314,18 +302,14 @@ jobs:
               "Scores and severity are computed deterministically by the calling system.",
               "Your job is ONLY to find vulnerabilities and select the 8 CVSS metric letters.",
               "",
-              "USE YOUR THINKING to work through the diff systematically.",
-              "In your thinking, explicitly go through EVERY step below for EVERY file in the diff.",
-              "Do not skip any step. Do not skip any section of the diff.",
-              "",
               "OUTPUT: Respond with ONLY a valid raw JSON object. No markdown, no backticks, no explanation.",
               "",
               "================================================================",
               "STEP 1 — MAP ALL USER INPUT SOURCES",
               "================================================================",
               "",
-              "In your thinking, identify every source of user-controlled input",
-              "in the ADDED lines:",
+              "Before looking for vulnerabilities, identify every source of",
+              "user-controlled input in the ADDED lines:",
               "",
               "  - HTTP params      — req.params, req.query, request.GET, request.POST",
               "  - Request body     — req.body, request.json(), request.form",
@@ -337,35 +321,60 @@ jobs:
               "  - Message queues   — payloads consumed from external queues or events",
               "  - Environment vars — if populated from external/untrusted sources",
               "",
+              "Note every input source before moving to Step 2.",
+              "",
               "================================================================",
               "STEP 2 — TRACE EVERY INPUT TO ITS SINK",
               "================================================================",
               "",
-              "In your thinking, for each input source trace where it flows:",
+              "For each input source found in Step 1, trace where it flows.",
+              "If it reaches any of these dangerous sinks — flag it:",
               "",
-              "  Database query  — db.query(), execute(), raw(), string concat in SQL",
-              "  Shell command   — exec(), spawn(), system(), popen(), subprocess",
-              "  File path       — fs.readFile(), open(), path.join() with user input",
-              "  HTML output     — innerHTML, dangerouslySetInnerHTML, res.send(html)",
-              "  Redirect target — res.redirect(), header Location, sendRedirect()",
-              "  Outbound URL    — fetch(url), axios.get(url), requests.get(url)",
-              "  Eval / exec     — eval(), new Function(), compile(), importlib",
-              "  Log statement   — console.log(), logger.info() with sensitive values",
-              "  Deserializer    — pickle.loads(), unserialize(), yaml.load()",
-              "  Template engine — render(), Jinja2, Handlebars with user input",
+              "  SINK                  DANGEROUS IF UNSANITIZED",
+              "  Database query        db.query(), execute(), raw(), string concat in SQL",
+              "  Shell command         exec(), spawn(), system(), popen(), subprocess",
+              "  File path             fs.readFile(), open(), path.join() with user input",
+              "  HTML output           innerHTML, dangerouslySetInnerHTML, res.send(html)",
+              "  Redirect target       res.redirect(), header Location, sendRedirect()",
+              "  Outbound HTTP URL     fetch(url), axios.get(url), requests.get(url)",
+              "  Eval / code exec      eval(), new Function(), compile(), importlib",
+              "  Log statement         console.log(), logger.info() with sensitive values",
+              "  Deserializer          pickle.loads(), unserialize(), yaml.load()",
+              "  Template engine       render(), Jinja2, Handlebars with user input",
               "",
               "================================================================",
               "STEP 3 — INJECTION CHECKLIST",
               "================================================================",
               "",
               "[ ] SQL Injection (CWE-89)",
+              "    Is user input concatenated or interpolated into a SQL string?",
+              "    UNSAFE : 'SELECT * FROM users WHERE id = ' + userId",
+              "    SAFE   : parameterized queries, prepared statements, ORM bound params",
+              "",
               "[ ] Command Injection (CWE-78)",
+              "    Is user input passed to a shell execution function?",
+              "    UNSAFE : exec('convert ' + filename), os.system(userInput)",
+              "    SAFE   : execFile() with array args, subprocess with list not string",
+              "",
               "[ ] Code Injection (CWE-94)",
+              "    Is user input passed to eval() or dynamic code execution?",
+              "    UNSAFE : eval(userInput), new Function(userInput)",
+              "",
               "[ ] Template Injection (CWE-1336)",
-              "[ ] XXE (CWE-611)",
+              "    Is user input rendered inside a server-side template string?",
+              "    UNSAFE : template.render(userInput), Jinja2 env.from_string(userInput)",
+              "",
+              "[ ] XXE — XML External Entity (CWE-611)",
+              "    Is XML being parsed? Are external entities explicitly disabled?",
+              "",
               "[ ] Log Injection (CWE-117)",
+              "    Is unsanitized user input written directly to log files?",
+              "",
               "[ ] LDAP Injection (CWE-90)",
+              "    Is user input used inside an LDAP search filter without escaping?",
+              "",
               "[ ] XPath Injection (CWE-643)",
+              "    Is user input concatenated into an XPath expression?",
               "",
               "================================================================",
               "STEP 4 — AUTHENTICATION AND ACCESS CONTROL CHECKLIST",
@@ -373,7 +382,7 @@ jobs:
               "",
               "[ ] Missing Authentication (CWE-306)",
               "[ ] Missing Authorization (CWE-862)",
-              "[ ] IDOR (CWE-639)",
+              "[ ] IDOR — Insecure Direct Object Reference (CWE-639)",
               "[ ] Privilege Escalation (CWE-269)",
               "[ ] JWT Issues (CWE-347)",
               "[ ] Session Fixation (CWE-384)",
@@ -386,21 +395,21 @@ jobs:
               "",
               "[ ] Hardcoded Credentials (CWE-798)",
               "[ ] Hardcoded Crypto Key (CWE-321)",
-              "[ ] Weak Hashing Algorithm (CWE-327)",
-              "[ ] Insecure Random (CWE-330)",
-              "[ ] Weak Cipher (CWE-326)",
+              "[ ] Weak Hashing Algorithm (CWE-327) — MD5/SHA1 for passwords",
+              "[ ] Insecure Random (CWE-330) — Math.random() for security tokens",
+              "[ ] Weak Cipher (CWE-326) — DES/3DES/RC4/AES-ECB",
               "[ ] Missing Encryption (CWE-311)",
               "",
               "================================================================",
               "STEP 6 — INPUT HANDLING AND REQUEST FORGERY CHECKLIST",
               "================================================================",
               "",
-              "[ ] XSS (CWE-79)",
-              "[ ] SSRF (CWE-918)",
+              "[ ] XSS — Cross-Site Scripting (CWE-79)",
+              "[ ] SSRF — Server-Side Request Forgery (CWE-918)",
               "[ ] Open Redirect (CWE-601)",
               "[ ] Path Traversal (CWE-22)",
               "[ ] Unrestricted File Upload (CWE-434)",
-              "[ ] CSRF (CWE-352)",
+              "[ ] CSRF — Cross-Site Request Forgery (CWE-352)",
               "[ ] HTTP Header Injection (CWE-113)",
               "[ ] Prototype Pollution (CWE-1321)",
               "",
@@ -467,18 +476,18 @@ jobs:
               "",
               "STRICT RULES:",
               "- Output ONLY the raw JSON object. No markdown. No backticks. No explanation.",
-              "- Report ONLY real security vulnerabilities.",
-              "- Every metrics object MUST have all 8 keys.",
+              "- Report ONLY real security vulnerabilities. Never comment on style or performance.",
+              "- Every metrics object MUST have all 8 keys with values from the allowed set.",
               "- If no vulnerabilities found return: { \"findings\": [] }",
               "- Do NOT compute CVSS scores. Do NOT assign severity labels."
             ].join("\n");
 
             const userPrompt =
               "Analyze the diff below for security vulnerabilities.\n" +
-              "Use your thinking to work through ALL 7 steps of the checklist.\n" +
-              "Go through every section of the diff — do not skip any lines.\n" +
-              "After thinking, output ONLY a single raw JSON object.\n" +
-              "First character must be { and last character must be }.\n\n" +
+              "Follow the checklist in the system prompt internally.\n" +
+              "Do NOT write any explanation, thinking, or text before the JSON.\n" +
+              "Your entire response must be a single raw JSON object starting with { and ending with }.\n" +
+              "First character of your response must be { and nothing else.\n\n" +
               "Diff to analyze:\n" +
               truncatedDiff;
 
@@ -499,28 +508,18 @@ jobs:
             console.log(`  Diff tokens (est)       : ~${diffTokensEst}`);
             console.log(`  Total input est/call    : ~${totalInputTokensEst}`);
             console.log(`  Total input est/total   : ~${totalInputTokensEst * NUM_RUNS} (${NUM_RUNS} runs)`);
-            console.log(`  Thinking budget/call    : ${BUDGET_TOKENS}`);
-            console.log(`  Max tokens/call         : ${MAX_TOKENS}`);
-            console.log(`  Output available/call   : ~${MAX_TOKENS - BUDGET_TOKENS}`);
+            console.log(`  Max output tokens/call  : ${MAX_TOKENS}`);
             console.log(`  Diff truncated          : ${wasTruncated}`);
             console.log(`════════════════════════════════════════════════`);
 
             try {
 
-              // ─── HELPER: single Claude API call with thinking ──────
-              // Extended thinking is enabled via the thinking parameter.
-              // The model outputs two block types:
-              //   { type: "thinking", thinking: "..." } — internal reasoning
-              //   { type: "text", text: "..." }         — final JSON output
-              // We filter to only text blocks for JSON parsing.
-              // The thinking blocks are logged for debugging but not used
-              // in the output — they just ensure the model reasons through
-              // every step before producing the findings JSON.
+              // ─── HELPER: single Claude API call ───────────────────
               const callClaude = async (runIndex) => {
-                console.log(`\nRun ${runIndex + 1}/${NUM_RUNS} — calling ${MODEL} with extended thinking (budget: ${BUDGET_TOKENS} tokens)...`);
+                console.log(`\nRun ${runIndex + 1}/${NUM_RUNS} — calling ${MODEL} (temperature: ${TEMPERATURE})...`);
 
                 const controller = new AbortController();
-                const timeoutId  = setTimeout(() => controller.abort(), 180000); // 3 min — thinking takes longer
+                const timeoutId  = setTimeout(() => controller.abort(), 120000);
                 let response;
                 try {
                   response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -533,14 +532,6 @@ jobs:
                     body: JSON.stringify({
                       model: MODEL,
                       max_tokens: MAX_TOKENS,
-                      // Extended thinking — forces systematic step-by-step
-                      // reasoning before output, eliminating attention drift
-                      thinking: {
-                        type: "enabled",
-                        budget_tokens: BUDGET_TOKENS
-                      },
-                      // temperature 1 is required for extended thinking
-                      // temperature 0 is not supported in thinking mode
                       temperature: TEMPERATURE,
                       system: systemPrompt,
                       messages: [{ role: "user", content: userPrompt }]
@@ -559,16 +550,11 @@ jobs:
                 }
 
                 const data    = await response.json();
-                const content = data?.content ?? [];
-
-                // ── Log thinking block summary ──
-                const thinkingBlocks = content.filter(b => b.type === "thinking");
-                const textBlocks     = content.filter(b => b.type === "text");
-
-                if (thinkingBlocks.length > 0) {
-                  const thinkingChars = thinkingBlocks.reduce((sum, b) => sum + (b.thinking?.length ?? 0), 0);
-                  console.log(`  Run ${runIndex + 1} — thinking blocks: ${thinkingBlocks.length} (${thinkingChars} chars)`);
-                }
+                const rawText = (data?.content ?? [])
+                  .filter(b => b.type === "text")
+                  .map(b => b.text)
+                  .join("\n")
+                  .trim();
 
                 const usage          = data.usage || {};
                 const inputTok       = usage.input_tokens               ?? 0;
@@ -579,19 +565,12 @@ jobs:
                 console.log(`  ┌─ Run ${runIndex + 1} tokens ──────────────────────────`);
                 console.log(`  │  Input tokens        : ${inputTok}`);
                 console.log(`  │  Output tokens       : ${outputTok}`);
-                console.log(`  │  (incl thinking)     : ${outputTok} total output`);
                 if (cacheCreateTok > 0) console.log(`  │  Cache create tokens : ${cacheCreateTok}`);
                 if (cacheReadTok   > 0) console.log(`  │  Cache read tokens   : ${cacheReadTok}`);
                 console.log(`  └────────────────────────────────────────────`);
 
-                // ── Extract only text blocks for JSON parsing ──
-                const rawText = textBlocks
-                  .map(b => b.text)
-                  .join("\n")
-                  .trim();
-
                 if (!rawText) {
-                  console.warn(`  Run ${runIndex + 1} returned no text block — skipping.`);
+                  console.warn(`  Run ${runIndex + 1} returned empty response — skipping.`);
                   return { error: false, findings: [], usage };
                 }
 
@@ -721,7 +700,7 @@ jobs:
               // ─── DEDUPLICATION ─────────────────────────────────────
               const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
 
-              // ─── FINAL TOKEN SUMMARY ───────────────────────────────
+              // ─── FINAL TOKEN SUMMARY (Actions log) ────────────────
               const avgInputPerRun  = successfulRuns > 0 ? Math.round(totalInputTokens  / successfulRuns) : 0;
               const avgOutputPerRun = successfulRuns > 0 ? Math.round(totalOutputTokens / successfulRuns) : 0;
 
@@ -730,12 +709,13 @@ jobs:
               console.log(`════════════════════════════════════════════════`);
               console.log(`  System prompt tokens (est/run)  : ~${systemPromptTokensEst}`);
               console.log(`  Diff tokens (est/run)           : ~${diffTokensEst}`);
-              console.log(`  Thinking budget/run             : ${BUDGET_TOKENS}`);
+              console.log(`  Total input est/run             : ~${totalInputTokensEst}`);
+              console.log(`  ── Actuals from API ───────────────────────`);
               console.log(`  Successful runs                 : ${successfulRuns}/${NUM_RUNS}`);
               console.log(`  Avg input tokens/run            : ${avgInputPerRun}`);
-              console.log(`  Avg output tokens/run           : ${avgOutputPerRun} (includes thinking)`);
+              console.log(`  Avg output tokens/run           : ${avgOutputPerRun}`);
               console.log(`  Total input tokens              : ${totalInputTokens}`);
-              console.log(`  Total output tokens             : ${totalOutputTokens} (includes thinking)`);
+              console.log(`  Total output tokens             : ${totalOutputTokens}`);
               if (totalCacheCreate > 0) console.log(`  Cache creation tokens           : ${totalCacheCreate}`);
               if (totalCacheRead   > 0) console.log(`  Cache read tokens               : ${totalCacheRead}`);
               console.log(`  Grand total tokens              : ${totalInputTokens + totalOutputTokens}`);
@@ -785,7 +765,7 @@ jobs:
                 return { ...f, metrics, score, severity, vector, usedCanonical };
               });
 
-              // ─── Sort by severity ──────────────────────────────────
+              // ─── Sort findings by severity order ──────────────────
               const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3, Info: 4, Unknown: 5 };
               findings.sort((a, b) => (severityRank[a.severity] ?? 5) - (severityRank[b.severity] ?? 5));
 
@@ -805,7 +785,9 @@ jobs:
               const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
 
               // ═══════════════════════════════════════════════════════
-              // PR COMMENT — developer facing only
+              // PR COMMENT — developer-facing only
+              // One flat table at top, then all detail blocks below
+              // No token info, no CVSS breakdown, no vector, no meta
               // ═══════════════════════════════════════════════════════
               let commentBody  = `## Security Review\n\n`;
               commentBody     += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
@@ -823,7 +805,7 @@ jobs:
                 commentBody += `> ✅ No security vulnerabilities found in this diff.\n`;
               } else {
 
-                // ── Single flat table ──
+                // ── Single flat table sorted by severity ──
                 commentBody += `| ID | Severity | CVSS Score | Certainty | File | Line | Issue |\n`;
                 commentBody += `|----|----------|------------|-----------|------|------|-------|\n`;
                 for (const f of findings) {
@@ -832,7 +814,7 @@ jobs:
                 }
                 commentBody += `\n---\n\n`;
 
-                // ── Detail blocks ──
+                // ── All detail blocks in same severity order ──
                 for (const f of findings) {
                   if (f.severity === 'Unknown') continue;
                   commentBody += `**[${f.id}] ${f.title}**\n`;
@@ -849,9 +831,10 @@ jobs:
               }
 
               if (wasTruncated) {
-                commentBody += `> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed.\n`;
+                commentBody += `> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed. Consider splitting this PR.\n`;
               }
 
+              // ─── Post PR comment ───────────────────────────────────
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -863,6 +846,7 @@ jobs:
 
               // ═══════════════════════════════════════════════════════
               // SLACK — full technical details
+              // Everything the PR comment omits goes here
               // ═══════════════════════════════════════════════════════
               const slackLines = [
                 totalFindings === 0
@@ -870,24 +854,23 @@ jobs:
                   : `🔎 *Security Review Complete — ${totalFindings} Finding(s) Found*`,
                 `> *Repo*: ${repoLabel}`,
                 `> *PR*: <${prLink}|#${context.issue.number}>`,
-                `> *Model*: \`${MODEL}\` with Extended Thinking`,
-                `> *Thinking Budget*: ${BUDGET_TOKENS} tokens/run`,
+                `> *Model*: \`${MODEL}\``,
+                `> *Temperature*: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
                 `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
                 `> *Quorum*: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings in at least ${MIN_RUNS_REQUIRED} runs reported`,
                 `> *Scanned*: ${today}`,
                 `> *Summary*: 🔴 Critical ${groups.Critical.length} | 🟠 High ${groups.High.length} | 🟡 Medium ${groups.Medium.length} | 🔵 Low ${groups.Low.length} | ℹ️ Info ${groups.Info.length}`,
                 `>`,
                 `> *Token Breakdown*`,
-                `> • System prompt  : ~${systemPromptTokensEst} tokens/run`,
-                `> • Diff           : ~${diffTokensEst} tokens/run`,
-                `> • Thinking budget: ${BUDGET_TOKENS} tokens/run`,
-                `> • Total input    : ${totalInputTokens} tokens actual | est ~${totalInputTokensEst * successfulRuns}`,
-                `> • Total output   : ${totalOutputTokens} tokens actual (includes thinking) | avg ~${avgOutputPerRun}/run`,
-                `> • Grand total    : ${totalInputTokens + totalOutputTokens} tokens`,
+                `> • System prompt : ~${systemPromptTokensEst} tokens/run | ~${systemPromptTokensEst * successfulRuns} tokens total`,
+                `> • Diff          : ~${diffTokensEst} tokens/run | ~${diffTokensEst * successfulRuns} tokens total`,
+                `> • Total input   : ${totalInputTokens} tokens (actual) | est ~${totalInputTokensEst * successfulRuns}`,
+                `> • Total output  : ${totalOutputTokens} tokens (actual) | avg ~${avgOutputPerRun}/run`,
+                `> • Grand total   : ${totalInputTokens + totalOutputTokens} tokens`,
               ];
 
-              if (totalCacheCreate > 0) slackLines.push(`> • Cache create    : ${totalCacheCreate} tokens`);
-              if (totalCacheRead   > 0) slackLines.push(`> • Cache read      : ${totalCacheRead} tokens`);
+              if (totalCacheCreate > 0) slackLines.push(`> • Cache create   : ${totalCacheCreate} tokens`);
+              if (totalCacheRead   > 0) slackLines.push(`> • Cache read     : ${totalCacheRead} tokens`);
 
               if (totalFindings > 0) {
                 slackLines.push('');
@@ -909,7 +892,7 @@ jobs:
                   if (f.severity === 'Unknown') continue;
                   slackLines.push(`[${f.id}] ${f.title}`);
                   slackLines.push(`  Vector : ${f.vector ?? 'N/A'}`);
-                  slackLines.push(`  Source : ${f.usedCanonical ? 'Canonical CWE table' : 'Model-assigned'}`);
+                  slackLines.push(`  Source : ${f.usedCanonical ? 'Canonical CWE table' : 'Model-assigned (temp=0)'}`);
                   if (f.metrics) {
                     slackLines.push(`  AV:${f.metrics.AV} AC:${f.metrics.AC} PR:${f.metrics.PR} UI:${f.metrics.UI} S:${f.metrics.S} C:${f.metrics.C} I:${f.metrics.I} A:${f.metrics.A}`);
                   }
