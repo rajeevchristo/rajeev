@@ -349,7 +349,6 @@ jobs:
               "[ ] SQL Injection (CWE-89)",
               "    Is user input concatenated or interpolated into a SQL string?",
               "    UNSAFE : 'SELECT * FROM users WHERE id = ' + userId",
-              "    UNSAFE : SELECT * FROM users WHERE id = ${userId}",
               "    SAFE   : parameterized queries, prepared statements, ORM bound params",
               "",
               "[ ] Command Injection (CWE-78)",
@@ -359,7 +358,7 @@ jobs:
               "",
               "[ ] Code Injection (CWE-94)",
               "    Is user input passed to eval() or dynamic code execution?",
-              "    UNSAFE : eval(userInput), new Function(userInput), exec(userCode)",
+              "    UNSAFE : eval(userInput), new Function(userInput)",
               "",
               "[ ] Template Injection (CWE-1336)",
               "    Is user input rendered inside a server-side template string?",
@@ -367,11 +366,9 @@ jobs:
               "",
               "[ ] XXE — XML External Entity (CWE-611)",
               "    Is XML being parsed? Are external entities explicitly disabled?",
-              "    UNSAFE : default XML parser config that allows DOCTYPE declarations",
               "",
               "[ ] Log Injection (CWE-117)",
               "    Is unsanitized user input written directly to log files?",
-              "    UNSAFE : logger.info('Request from: ' + userInput)",
               "",
               "[ ] LDAP Injection (CWE-90)",
               "    Is user input used inside an LDAP search filter without escaping?",
@@ -384,147 +381,49 @@ jobs:
               "================================================================",
               "",
               "[ ] Missing Authentication (CWE-306)",
-              "    Does this new endpoint or function require a login check?",
-              "    Is there an auth middleware or guard applied before it executes?",
-              "    Can it be reached without a valid session or token?",
-              "",
               "[ ] Missing Authorization (CWE-862)",
-              "    After authentication — does it check if the user is ALLOWED?",
-              "    Can user A read or modify user B's data by changing an ID?",
-              "",
               "[ ] IDOR — Insecure Direct Object Reference (CWE-639)",
-              "    Is a resource fetched using a user-supplied ID without ownership check?",
-              "    UNSAFE : db.find({ id: req.params.id }) with no ownership check",
-              "",
               "[ ] Privilege Escalation (CWE-269)",
-              "    Can a regular user trigger admin-only operations?",
-              "    Is the role/permission checked server-side or only client-side?",
-              "",
               "[ ] JWT Issues (CWE-347)",
-              "    Is the JWT signature verified before trusting its claims?",
-              "    Is the algorithm explicitly enforced, not taken from the token header?",
-              "    Could alg:none or algorithm confusion be exploited?",
-              "",
               "[ ] Session Fixation (CWE-384)",
-              "    Is the session ID rotated after a successful login?",
-              "",
               "[ ] Mass Assignment (CWE-915)",
-              "    Is req.body or a similar object spread directly onto a model?",
-              "    UNSAFE : User.update(req.body) — attacker can set role or isAdmin",
-              "",
               "[ ] Broken Access Control (CWE-284)",
-              "    Are role checks present and enforced for every sensitive operation?",
               "",
               "================================================================",
               "STEP 5 — SECRETS AND CRYPTOGRAPHY CHECKLIST",
               "================================================================",
               "",
               "[ ] Hardcoded Credentials (CWE-798)",
-              "    Scan every string literal in ADDED lines.",
-              "    Flag any string that looks like:",
-              "      - API key, secret key, auth token, private key, bearer token",
-              "      - Database connection string containing a password",
-              "      - Variable named: secret, password, token, key, apiKey, credentials",
-              "      - Known prefixes: sk-, pk-, ghp_, ghs_, AKIA, SG., xox, rk_live_",
-              "      - Long random-looking alphanumeric strings (32+ chars) in assignments",
-              "      - Default parameter values that look like real secrets",
-              "      - Base64 or hex encoded strings assigned to credential variables",
-              "      - Secrets inside comments: // password is Admin123",
-              "      - Secrets in config objects: { host: 'db', pass: 'abc123' }",
-              "",
               "[ ] Hardcoded Crypto Key (CWE-321)",
-              "    Is an encryption key, IV, or salt hardcoded as a string literal?",
-              "",
-              "[ ] Weak Hashing Algorithm (CWE-327)",
-              "    Is MD5 or SHA1 used for passwords or any security-sensitive data?",
-              "    SAFE   : bcrypt, argon2, scrypt, PBKDF2",
-              "    UNSAFE : md5(password), sha1(password), hashlib.md5(password)",
-              "",
-              "[ ] Insecure Random (CWE-330)",
-              "    Is Math.random() or rand() used for security tokens, session IDs,",
-              "    password reset codes, OTPs, or nonces?",
-              "    SAFE   : crypto.randomBytes(), secrets.token_hex(), os.urandom()",
-              "",
-              "[ ] Weak Cipher (CWE-326)",
-              "    Is DES, 3DES, RC4, Blowfish, or AES in ECB mode used?",
-              "    SAFE   : AES-256-GCM, AES-256-CBC with random IV, ChaCha20-Poly1305",
-              "",
+              "[ ] Weak Hashing Algorithm (CWE-327) — MD5/SHA1 for passwords",
+              "[ ] Insecure Random (CWE-330) — Math.random() for security tokens",
+              "[ ] Weak Cipher (CWE-326) — DES/3DES/RC4/AES-ECB",
               "[ ] Missing Encryption (CWE-311)",
-              "    Is sensitive data (PII, passwords, tokens) stored or transmitted",
-              "    without encryption?",
               "",
               "================================================================",
               "STEP 6 — INPUT HANDLING AND REQUEST FORGERY CHECKLIST",
               "================================================================",
               "",
               "[ ] XSS — Cross-Site Scripting (CWE-79)",
-              "    Is user input rendered in HTML without proper escaping?",
-              "    UNSAFE : element.innerHTML = userInput",
-              "    UNSAFE : dangerouslySetInnerHTML with user input",
-              "    UNSAFE : res.send('<div>' + userInput + '</div>')",
-              "",
               "[ ] SSRF — Server-Side Request Forgery (CWE-918)",
-              "    Is a user-controlled value used as the URL in an outbound HTTP request?",
-              "    UNSAFE : fetch(req.body.url), requests.get(userInput)",
-              "",
               "[ ] Open Redirect (CWE-601)",
-              "    Is a user-controlled value used as a redirect destination?",
-              "    UNSAFE : res.redirect(req.query.next), sendRedirect(userInput)",
-              "",
               "[ ] Path Traversal (CWE-22)",
-              "    Is user input used in a file path without sanitization?",
-              "    UNSAFE : fs.readFile('./uploads/' + userInput)",
-              "    UNSAFE : open(base_dir + user_filename)",
-              "    SAFE   : path.basename() to strip directory components, allowlist",
-              "",
               "[ ] Unrestricted File Upload (CWE-434)",
-              "    Is file type validated by content (magic bytes), not just extension?",
-              "    Is file size limited? Is file stored outside the web root?",
-              "",
               "[ ] CSRF — Cross-Site Request Forgery (CWE-352)",
-              "    Do state-changing endpoints (POST/PUT/PATCH/DELETE) verify a CSRF token?",
-              "",
               "[ ] HTTP Header Injection (CWE-113)",
-              "    Is user input written into HTTP response headers without validation?",
-              "    UNSAFE : res.setHeader('Location', userInput)",
-              "",
               "[ ] Prototype Pollution (CWE-1321)",
-              "    Is user input merged into a plain object without filtering __proto__?",
-              "    UNSAFE : Object.assign(target, userInput), _.merge(obj, userInput)",
               "",
               "================================================================",
               "STEP 7 — DATA EXPOSURE AND MISCONFIGURATION CHECKLIST",
               "================================================================",
               "",
               "[ ] Sensitive Data in Logs (CWE-532)",
-              "    Are passwords, tokens, PII, card numbers, or secrets written to logs?",
-              "    UNSAFE : console.log('Login:', { email, password })",
-              "    UNSAFE : logger.debug('Token: ' + authToken)",
-              "",
               "[ ] Stack Trace Exposed to Client (CWE-209)",
-              "    Are raw error objects, stack traces, or internal paths returned",
-              "    in API responses visible to the caller?",
-              "    UNSAFE : res.json({ error: err.stack })",
-              "",
               "[ ] Debug Mode Enabled (CWE-215)",
-              "    Are debug flags, verbose error modes, or development settings",
-              "    left enabled in code that could reach production?",
-              "    UNSAFE : app.use(errorHandler({ dumpExceptions: true }))",
-              "    UNSAFE : DEBUG = True in a non-development config",
-              "",
               "[ ] Insecure Deserialization (CWE-502)",
-              "    Is untrusted data passed to a deserializer?",
-              "    UNSAFE : pickle.loads(userInput), unserialize(userInput)",
-              "    UNSAFE : yaml.load(data) without Loader=yaml.SafeLoader",
-              "",
               "[ ] Dependency Confusion (CWE-427)",
-              "    Are new internal package names added that could be typosquatted?",
-              "",
               "[ ] Insecure Direct Storage (CWE-313)",
-              "    Is sensitive data written to disk without encryption?",
-              "",
               "[ ] Race Condition / TOCTOU (CWE-362)",
-              "    Is shared state modified without locks?",
               "",
               "================================================================",
               "CVSS METRIC SELECTION RULES",
@@ -592,12 +491,10 @@ jobs:
               "Diff to analyze:\n" +
               truncatedDiff;
 
-            // ─── TOKEN ESTIMATES (before API calls) ───────────────────
-            // Anthropic tokenizer: ~4 chars per token for English/code
-            // These are estimates — actual counts come from API response
-            const systemPromptChars  = systemPrompt.length;
-            const diffChars          = truncatedDiff.length;
-            const userPromptChars    = userPrompt.length; // includes diff
+            // ─── TOKEN ESTIMATES ───────────────────────────────────────
+            const systemPromptChars     = systemPrompt.length;
+            const diffChars             = truncatedDiff.length;
+            const userPromptChars       = userPrompt.length;
             const systemPromptTokensEst = Math.round(systemPromptChars / 4);
             const diffTokensEst         = Math.round(diffChars / 4);
             const totalInputTokensEst   = Math.round((systemPromptChars + userPromptChars) / 4);
@@ -609,11 +506,9 @@ jobs:
             console.log(`  System prompt tokens    : ~${systemPromptTokensEst}`);
             console.log(`  Diff chars              : ${diffChars}`);
             console.log(`  Diff tokens (est)       : ~${diffTokensEst}`);
-            console.log(`  User prompt tokens (est): ~${Math.round(userPromptChars / 4)}`);
-            console.log(`  Total input  (est/call) : ~${totalInputTokensEst}`);
-            console.log(`  Total input  (est/total): ~${totalInputTokensEst * NUM_RUNS} (${NUM_RUNS} runs)`);
+            console.log(`  Total input est/call    : ~${totalInputTokensEst}`);
+            console.log(`  Total input est/total   : ~${totalInputTokensEst * NUM_RUNS} (${NUM_RUNS} runs)`);
             console.log(`  Max output tokens/call  : ${MAX_TOKENS}`);
-            console.log(`  Max output total        : ${MAX_TOKENS * NUM_RUNS} (${NUM_RUNS} runs)`);
             console.log(`  Diff truncated          : ${wasTruncated}`);
             console.log(`════════════════════════════════════════════════`);
 
@@ -661,23 +556,17 @@ jobs:
                   .join("\n")
                   .trim();
 
-                const usage = data.usage || {};
+                const usage          = data.usage || {};
+                const inputTok       = usage.input_tokens               ?? 0;
+                const outputTok      = usage.output_tokens              ?? 0;
+                const cacheCreateTok = usage.cache_creation_input_tokens ?? 0;
+                const cacheReadTok   = usage.cache_read_input_tokens     ?? 0;
 
-                // ── Per-run token breakdown ──
-                // cache_creation_input_tokens and cache_read_input_tokens
-                // are present if prompt caching is active on your account
-                const inputTok        = usage.input_tokens              ?? 0;
-                const outputTok       = usage.output_tokens             ?? 0;
-                const cacheCreateTok  = usage.cache_creation_input_tokens ?? 0;
-                const cacheReadTok    = usage.cache_read_input_tokens     ?? 0;
-
-                console.log(`  ┌─ Run ${runIndex + 1} token breakdown ─────────────────`);
-                console.log(`  │  Input tokens (total)      : ${inputTok}`);
-                console.log(`  │    of which system prompt  : ~${systemPromptTokensEst} (est)`);
-                console.log(`  │    of which diff + prompt  : ~${inputTok - systemPromptTokensEst > 0 ? inputTok - systemPromptTokensEst : 'N/A'} (est)`);
-                if (cacheCreateTok > 0) console.log(`  │  Cache creation tokens     : ${cacheCreateTok}`);
-                if (cacheReadTok   > 0) console.log(`  │  Cache read tokens         : ${cacheReadTok}`);
-                console.log(`  │  Output tokens             : ${outputTok}`);
+                console.log(`  ┌─ Run ${runIndex + 1} tokens ──────────────────────────`);
+                console.log(`  │  Input tokens        : ${inputTok}`);
+                console.log(`  │  Output tokens       : ${outputTok}`);
+                if (cacheCreateTok > 0) console.log(`  │  Cache create tokens : ${cacheCreateTok}`);
+                if (cacheReadTok   > 0) console.log(`  │  Cache read tokens   : ${cacheReadTok}`);
                 console.log(`  └────────────────────────────────────────────`);
 
                 if (!rawText) {
@@ -693,7 +582,7 @@ jobs:
                   const firstBrace = cleaned.indexOf('{');
                   const lastBrace  = cleaned.lastIndexOf('}');
                   if (firstBrace === -1 || lastBrace === -1) {
-                    console.warn(`  Run ${runIndex + 1} — no JSON object found in response.`);
+                    console.warn(`  Run ${runIndex + 1} — no JSON object found.`);
                     return { error: false, findings: [], usage };
                   }
                   if (firstBrace > 0) {
@@ -714,13 +603,12 @@ jobs:
               const deduplicateFindings = (allFindings, successfulRuns) => {
                 const certaintyRank = { Confirmed: 4, Likely: 3, Possible: 2, Unlikely: 1 };
                 const threshold     = Math.min(MIN_RUNS_REQUIRED, successfulRuns);
-                console.log(`\n  Quorum threshold: ${threshold}/${successfulRuns} successful runs`);
+                console.log(`\n  Quorum threshold: ${threshold}/${successfulRuns}`);
 
                 const seen = new Map();
                 for (const f of allFindings) {
                   const lineGroup = Math.floor((f.line ?? 0) / 5) * 5;
                   const key = ((f.cwe ?? 'UNKNOWN') + '::' + (f.file ?? '') + '::' + lineGroup).toUpperCase();
-
                   if (!seen.has(key)) {
                     seen.set(key, { finding: f, count: 1 });
                   } else {
@@ -776,8 +664,8 @@ jobs:
                 }
 
                 successfulRuns    += 1;
-                totalInputTokens  += result.usage.input_tokens              ?? 0;
-                totalOutputTokens += result.usage.output_tokens             ?? 0;
+                totalInputTokens  += result.usage.input_tokens               ?? 0;
+                totalOutputTokens += result.usage.output_tokens              ?? 0;
                 totalCacheCreate  += result.usage.cache_creation_input_tokens ?? 0;
                 totalCacheRead    += result.usage.cache_read_input_tokens     ?? 0;
                 allRawFindings.push(...result.findings);
@@ -809,37 +697,37 @@ jobs:
                 return;
               }
 
-              // ─── DEDUPLICATION ────────────────────────────────────
+              // ─── DEDUPLICATION ─────────────────────────────────────
               const dedupedFindings = deduplicateFindings(allRawFindings, successfulRuns);
 
-              // ─── FULL TOKEN SUMMARY ────────────────────────────────
-              // Actual counts from API responses + breakdown by component
+              // ─── FINAL TOKEN SUMMARY (Actions log) ────────────────
               const avgInputPerRun  = successfulRuns > 0 ? Math.round(totalInputTokens  / successfulRuns) : 0;
               const avgOutputPerRun = successfulRuns > 0 ? Math.round(totalOutputTokens / successfulRuns) : 0;
 
               console.log(`\n════════════════════════════════════════════════`);
               console.log(`  FINAL TOKEN SUMMARY`);
               console.log(`════════════════════════════════════════════════`);
-              console.log(`  ── Estimates (chars / 4) ──────────────────`);
-              console.log(`  System prompt tokens (est)  : ~${systemPromptTokensEst} per run`);
-              console.log(`  Diff tokens (est)           : ~${diffTokensEst} per run`);
-              console.log(`  User prompt tokens (est)    : ~${Math.round(userPrompt.length / 4)} per run`);
-              console.log(`  Total input est per run     : ~${totalInputTokensEst}`);
-              console.log(`  ── Actuals (from API) ─────────────────────`);
-              console.log(`  Successful runs             : ${successfulRuns}/${NUM_RUNS}`);
-              console.log(`  Input tokens per run (avg)  : ${avgInputPerRun}`);
-              console.log(`  Output tokens per run (avg) : ${avgOutputPerRun}`);
-              console.log(`  Total input tokens          : ${totalInputTokens}`);
-              console.log(`  Total output tokens         : ${totalOutputTokens}`);
-              if (totalCacheCreate > 0) console.log(`  Cache creation tokens       : ${totalCacheCreate}`);
-              if (totalCacheRead   > 0) console.log(`  Cache read tokens           : ${totalCacheRead}`);
-              console.log(`  Grand total tokens          : ${totalInputTokens + totalOutputTokens}`);
-              console.log(`  ── Findings ───────────────────────────────`);
-              console.log(`  Raw findings (all runs)     : ${allRawFindings.length}`);
-              console.log(`  After quorum (${MIN_RUNS_REQUIRED}/${NUM_RUNS})          : ${dedupedFindings.length}`);
+              console.log(`  System prompt tokens (est/run)  : ~${systemPromptTokensEst}`);
+              console.log(`  Diff tokens (est/run)           : ~${diffTokensEst}`);
+              console.log(`  Total input est/run             : ~${totalInputTokensEst}`);
+              console.log(`  ── Actuals from API ───────────────────────`);
+              console.log(`  Successful runs                 : ${successfulRuns}/${NUM_RUNS}`);
+              console.log(`  Avg input tokens/run            : ${avgInputPerRun}`);
+              console.log(`  Avg output tokens/run           : ${avgOutputPerRun}`);
+              console.log(`  Total input tokens              : ${totalInputTokens}`);
+              console.log(`  Total output tokens             : ${totalOutputTokens}`);
+              if (totalCacheCreate > 0) console.log(`  Cache creation tokens           : ${totalCacheCreate}`);
+              if (totalCacheRead   > 0) console.log(`  Cache read tokens               : ${totalCacheRead}`);
+              console.log(`  Grand total tokens              : ${totalInputTokens + totalOutputTokens}`);
+              console.log(`  Raw findings (all runs)         : ${allRawFindings.length}`);
+              console.log(`  After quorum (${MIN_RUNS_REQUIRED}/${NUM_RUNS})               : ${dedupedFindings.length}`);
               console.log(`════════════════════════════════════════════════`);
 
               // ─── DETERMINISTIC SCORING ─────────────────────────────
+              const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info'];
+              const severityEmoji = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
+              const prefixMap     = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
+
               const findings = dedupedFindings.map((f, idx) => {
                 const cweKey           = (f.cwe ?? '').toUpperCase().replace(/\s/g, '');
                 const canonicalMetrics = CWE_VECTORS[cweKey];
@@ -865,8 +753,8 @@ jobs:
                   validCI.includes(metrics.A);
 
                 if (!isValid) {
-                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid metrics — skipping CVSS scoring.`);
-                  return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', usedCanonical };
+                  console.warn(`Finding ${idx + 1} ("${f.title}") has invalid metrics.`);
+                  return { ...f, score: null, severity: 'Unknown', vector: 'Invalid metrics', metrics, usedCanonical };
                 }
 
                 const score    = computeCVSS31(metrics);
@@ -877,92 +765,74 @@ jobs:
                 return { ...f, metrics, score, severity, vector, usedCanonical };
               });
 
-              // ─── Group by severity ─────────────────────────────────
+              // ─── Sort findings by severity order ──────────────────
+              const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3, Info: 4, Unknown: 5 };
+              findings.sort((a, b) => (severityRank[a.severity] ?? 5) - (severityRank[b.severity] ?? 5));
+
+              // ─── Assign IDs after sorting ──────────────────────────
+              const severityCounters = {};
+              findings.forEach(f => {
+                const prefix = prefixMap[f.severity] ?? 'UNK';
+                severityCounters[prefix] = (severityCounters[prefix] ?? 0) + 1;
+                f.id = `${prefix}-${severityCounters[prefix]}`;
+              });
+
+              // ─── Group counts ──────────────────────────────────────
               const groups = { Critical: [], High: [], Medium: [], Low: [], Info: [], Unknown: [] };
               for (const f of findings) {
                 (groups[f.severity] ?? groups.Unknown).push(f);
               }
               const totalFindings = findings.filter(f => f.severity !== 'Unknown').length;
 
-              // ─── Build PR comment ──────────────────────────────────
-              const severityOrder = ['Critical', 'High', 'Medium', 'Low', 'Info'];
-              const severityEmoji = { Critical: '🔴', High: '🟠', Medium: '🟡', Low: '🔵', Info: 'ℹ️' };
-              const prefixMap     = { Critical: 'CRIT', High: 'HIGH', Medium: 'MED', Low: 'LOW', Info: 'INFO' };
-
+              // ═══════════════════════════════════════════════════════
+              // PR COMMENT — developer-facing only
+              // One flat table at top, then all detail blocks below
+              // No token info, no CVSS breakdown, no vector, no meta
+              // ═══════════════════════════════════════════════════════
               let commentBody  = `## Security Review\n\n`;
               commentBody     += `> **Model**: \`${MODEL}\` | **Scan Date**: ${today}\n\n`;
               if (successfulRuns < NUM_RUNS) {
                 commentBody   += `> ⚠️ **Note**: ${successfulRuns}/${NUM_RUNS} scans completed — quorum still met.\n\n`;
               }
-              commentBody     += `**Summary**: ${totalFindings} issue(s) found — `;
-              commentBody     += `Critical ${groups.Critical.length} | High ${groups.High.length} | Medium ${groups.Medium.length} | Low ${groups.Low.length} | Info ${groups.Info.length}\n\n`;
-              commentBody     += `> 🔒 CVSS v3.1 scores computed deterministically by the CI system — not by the AI model.\n\n`;
-              commentBody     += `> 🔁 Only findings confirmed in at least **${MIN_RUNS_REQUIRED}/${NUM_RUNS}** independent scans are reported.\n\n`;
-              commentBody     += `---\n\n`;
+              commentBody     += `**${totalFindings} issue(s) found** — `;
+              commentBody     += `🔴 Critical ${groups.Critical.length} | `;
+              commentBody     += `🟠 High ${groups.High.length} | `;
+              commentBody     += `🟡 Medium ${groups.Medium.length} | `;
+              commentBody     += `🔵 Low ${groups.Low.length} | `;
+              commentBody     += `ℹ️ Info ${groups.Info.length}\n\n`;
 
-              for (const sev of severityOrder) {
-                const group = groups[sev];
-                if (!group || group.length === 0) continue;
+              if (totalFindings === 0) {
+                commentBody += `> ✅ No security vulnerabilities found in this diff.\n`;
+              } else {
 
-                commentBody += `### ${severityEmoji[sev]} ${sev} Issues\n\n`;
-                commentBody += `| Severity | CVSS Score | CVSS Vector | Certainty | File | Line | Issue |\n`;
-                commentBody += `|----------|------------|-------------|-----------|------|------|-------|\n`;
-                for (const f of group) {
-                  commentBody += `| ${sev} | ${f.score} | \`${f.vector}\` | ${f.certainty} | \`${f.file}\` | ${f.line} | ${f.title} |\n`;
+                // ── Single flat table sorted by severity ──
+                commentBody += `| ID | Severity | CVSS Score | Certainty | File | Line | Issue |\n`;
+                commentBody += `|----|----------|------------|-----------|------|------|-------|\n`;
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  commentBody += `| ${f.id} | ${severityEmoji[f.severity]} ${f.severity} | ${f.score ?? 'N/A'} | ${f.certainty} | \`${f.file}\` | ${f.line} | ${f.title} |\n`;
                 }
-                commentBody += `\n`;
+                commentBody += `\n---\n\n`;
 
-                const prefix = prefixMap[sev];
-                group.forEach((f, i) => {
-                  const id = `${prefix}-${i + 1}`;
-                  commentBody += `**[${id}] ${f.title}**\n`;
-                  commentBody += `- **Severity**: ${sev}\n`;
-                  commentBody += `- **CVSS Base Score**: ${f.score}\n`;
-                  commentBody += `- **CVSS Vector**: \`${f.vector}\`\n`;
-                  commentBody += `- **CVSS Breakdown**:\n`;
-                  commentBody += `  - AV: ${f.metrics.AV} | AC: ${f.metrics.AC} | PR: ${f.metrics.PR} | UI: ${f.metrics.UI}\n`;
-                  commentBody += `  - S: ${f.metrics.S} | C: ${f.metrics.C} | I: ${f.metrics.I} | A: ${f.metrics.A}\n`;
-                  commentBody += `- **Vector Source**: ${f.usedCanonical ? 'Canonical CWE lookup table (deterministic)' : 'Model-assigned metrics (temperature=0)'}\n`;
+                // ── All detail blocks in same severity order ──
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  commentBody += `**[${f.id}] ${f.title}**\n`;
+                  commentBody += `- **Severity**: ${severityEmoji[f.severity]} ${f.severity}\n`;
+                  commentBody += `- **CVSS Score**: ${f.score ?? 'N/A'}\n`;
                   commentBody += `- **Certainty**: ${f.certainty}\n`;
                   commentBody += `- **CWE**: ${f.cwe}\n`;
                   commentBody += `- **OWASP**: ${f.owasp}\n`;
+                  commentBody += `- **File**: \`${f.file}\` line ${f.line}\n`;
                   commentBody += `- **Description**: ${f.description}\n`;
                   commentBody += `- **Fix**:\n`;
                   commentBody += `\`\`\`diff\n- ${f.fix_before}\n+ ${f.fix_after}\n\`\`\`\n\n`;
-                });
-
-                commentBody += `---\n\n`;
+                }
               }
 
-              // ─── Footer with full token breakdown ─────────────────
-              const footerLines = [
-                `> 🤖 **Model**: \`${MODEL}\``,
-                `> 🌡️ **Temperature**: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
-                `> ✅ **Successful Runs**: ${successfulRuns}/${NUM_RUNS}`,
-                `> 📅 **Scanned**: ${today}`,
-                `> 🔁 **Quorum**: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings must appear in at least ${MIN_RUNS_REQUIRED} runs`,
-                `> 🔢 **Scoring**: CVSS v3.1 computed by CI system. Model outputs metric letters only.`,
-                `>`,
-                `> **Token Breakdown**`,
-                `> | Component | Per Run (est) | Total (${successfulRuns} runs actual) |`,
-                `> |-----------|--------------|-------------------------------|`,
-                `> | System prompt | ~${systemPromptTokensEst} tokens | ~${systemPromptTokensEst * successfulRuns} tokens |`,
-                `> | Diff + user prompt | ~${Math.round(userPrompt.length / 4)} tokens | ~${Math.round(userPrompt.length / 4) * successfulRuns} tokens |`,
-                `> | **Total input** | ~${totalInputTokensEst} tokens (est) | **${totalInputTokens} tokens (actual)** |`,
-                `> | **Total output** | ~${avgOutputPerRun} tokens (avg) | **${totalOutputTokens} tokens (actual)** |`,
-                `> | **Grand total** | — | **${totalInputTokens + totalOutputTokens} tokens** |`,
-              ];
-              if (totalCacheCreate > 0) {
-                footerLines.push(`> | Cache creation | — | ${totalCacheCreate} tokens |`);
-              }
-              if (totalCacheRead > 0) {
-                footerLines.push(`> | Cache read | — | ${totalCacheRead} tokens |`);
-              }
               if (wasTruncated) {
-                footerLines.push(`> `);
-                footerLines.push(`> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed. Consider splitting this PR.`);
+                commentBody += `> ⚠️ **Warning**: Diff was truncated at ${MAX_DIFF_CHARS} chars — some changes were NOT reviewed. Consider splitting this PR.\n`;
               }
-              commentBody += footerLines.join('\n') + '\n';
 
               // ─── Post PR comment ───────────────────────────────────
               await github.rest.issues.createComment({
@@ -974,46 +844,68 @@ jobs:
 
               console.log(`\nSecurity review posted on PR #${context.issue.number}`);
 
-              // ─── Slack summary ─────────────────────────────────────
-              const summaryLines = [
+              // ═══════════════════════════════════════════════════════
+              // SLACK — full technical details
+              // Everything the PR comment omits goes here
+              // ═══════════════════════════════════════════════════════
+              const slackLines = [
                 totalFindings === 0
                   ? `✅ *Security Review Complete — No Findings*`
                   : `🔎 *Security Review Complete — ${totalFindings} Finding(s) Found*`,
                 `> *Repo*: ${repoLabel}`,
                 `> *PR*: <${prLink}|#${context.issue.number}>`,
                 `> *Model*: \`${MODEL}\``,
-                `> *Temperature*: \`${TEMPERATURE}\` (all runs)`,
+                `> *Temperature*: \`${TEMPERATURE}\` (all ${NUM_RUNS} runs)`,
                 `> *Successful Runs*: ${successfulRuns}/${NUM_RUNS}`,
+                `> *Quorum*: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings in at least ${MIN_RUNS_REQUIRED} runs reported`,
                 `> *Scanned*: ${today}`,
-                `> *Summary*: Critical: ${groups.Critical.length} | High: ${groups.High.length} | Medium: ${groups.Medium.length} | Low: ${groups.Low.length} | Info: ${groups.Info.length}`,
-                `> *Quorum*: ${MIN_RUNS_REQUIRED}/${NUM_RUNS} — findings seen in at least ${MIN_RUNS_REQUIRED} runs reported`,
-                `> *Tokens*: Input ${totalInputTokens} | Output ${totalOutputTokens} | Total ${totalInputTokens + totalOutputTokens}`,
-                `> *Token Breakdown*: System ~${systemPromptTokensEst}/run | Diff ~${diffTokensEst}/run`,
+                `> *Summary*: 🔴 Critical ${groups.Critical.length} | 🟠 High ${groups.High.length} | 🟡 Medium ${groups.Medium.length} | 🔵 Low ${groups.Low.length} | ℹ️ Info ${groups.Info.length}`,
+                `>`,
+                `> *Token Breakdown*`,
+                `> • System prompt : ~${systemPromptTokensEst} tokens/run | ~${systemPromptTokensEst * successfulRuns} tokens total`,
+                `> • Diff          : ~${diffTokensEst} tokens/run | ~${diffTokensEst * successfulRuns} tokens total`,
+                `> • Total input   : ${totalInputTokens} tokens (actual) | est ~${totalInputTokensEst * successfulRuns}`,
+                `> • Total output  : ${totalOutputTokens} tokens (actual) | avg ~${avgOutputPerRun}/run`,
+                `> • Grand total   : ${totalInputTokens + totalOutputTokens} tokens`,
               ];
 
-              if (successfulRuns < NUM_RUNS) {
-                summaryLines.push(`> ⚠️ *Note*: ${NUM_RUNS - successfulRuns} run(s) failed — quorum still met`);
-              }
+              if (totalCacheCreate > 0) slackLines.push(`> • Cache create   : ${totalCacheCreate} tokens`);
+              if (totalCacheRead   > 0) slackLines.push(`> • Cache read     : ${totalCacheRead} tokens`);
 
               if (totalFindings > 0) {
-                summaryLines.push('');
-                summaryLines.push('*Findings:*');
-                summaryLines.push('```');
-                summaryLines.push('Severity   | Score | Finding');
-                summaryLines.push('-----------|-------|' + '-'.repeat(40));
-                for (const sev of severityOrder) {
-                  for (const f of (groups[sev] ?? [])) {
-                    summaryLines.push(`${sev.padEnd(10)} | ${String(f.score).padEnd(5)} | ${f.title}`);
-                  }
+                slackLines.push('');
+                slackLines.push('*Findings:*');
+                slackLines.push('```');
+                slackLines.push('ID      | Sev      | Score | Certainty | CWE    | File');
+                slackLines.push('--------|----------|-------|-----------|--------|-----');
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  slackLines.push(
+                    `${f.id.padEnd(7)} | ${f.severity.padEnd(8)} | ${String(f.score ?? 'N/A').padEnd(5)} | ${(f.certainty ?? '').padEnd(9)} | ${(f.cwe ?? '').padEnd(6)} | ${f.file}:${f.line}`
+                  );
                 }
-                summaryLines.push('```');
+                slackLines.push('```');
+                slackLines.push('');
+                slackLines.push('*CVSS Vectors & Breakdown:*');
+                slackLines.push('```');
+                for (const f of findings) {
+                  if (f.severity === 'Unknown') continue;
+                  slackLines.push(`[${f.id}] ${f.title}`);
+                  slackLines.push(`  Vector : ${f.vector ?? 'N/A'}`);
+                  slackLines.push(`  Source : ${f.usedCanonical ? 'Canonical CWE table' : 'Model-assigned (temp=0)'}`);
+                  if (f.metrics) {
+                    slackLines.push(`  AV:${f.metrics.AV} AC:${f.metrics.AC} PR:${f.metrics.PR} UI:${f.metrics.UI} S:${f.metrics.S} C:${f.metrics.C} I:${f.metrics.I} A:${f.metrics.A}`);
+                  }
+                  slackLines.push('');
+                }
+                slackLines.push('```');
               }
 
               if (wasTruncated) {
-                summaryLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed.`);
+                slackLines.push(`> ⚠️ *Warning*: Diff was truncated — some changes were NOT reviewed.`);
               }
 
-              await sendSlackAlert(summaryLines.join('\n'));
+              await sendSlackAlert(slackLines.join('\n'));
 
             } catch (error) {
               await sendSlackAlert(
