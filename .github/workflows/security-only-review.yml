@@ -149,8 +149,8 @@ jobs:
             // ─── CONFIG ────────────────────────────────────────────────
             const MAX_DIFF_CHARS = 120000;
             const MAX_TOKENS     = 8000;
-            const MODEL          = "minimax/minimax-m3";
-            const MODEL_LABEL    = "MiniMax M3";
+            const MODEL          = "deepseek/deepseek-v4-pro";
+            const MODEL_LABEL    = "DeepSeek V4 Pro";
             const TEMPERATURE    = 0;
             const OR_ENDPOINT    = "https://openrouter.ai/api/v1/chat/completions";
             // ───────────────────────────────────────────────────────────
